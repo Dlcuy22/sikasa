@@ -1,7 +1,5 @@
 # Sikasa
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/dlcuy22/sikasa.svg)](https://pkg.go.dev/github.com/dlcuy22/sikasa)
-
 Sikasa is a high-level, fluent wrapper around the popular [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) library. It eliminates boilerplate and simplifies common bot-building tasks without hiding the underlying power of `discordgo`.
 
 ## Why Sikasa?

@@ -1,2 +1,4 @@
 /.env*
 /example/media/
+*env
+example/.env.dev
