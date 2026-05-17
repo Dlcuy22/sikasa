@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/dlcuy22/sikasa"
 	"github.com/joho/godotenv"
@@ -56,7 +57,7 @@ func main() {
 		ReplyText("I am a simple bot. Try `/echo` or `/joke`!")
 
 	bot.OnKeyword("sikasa").
-		ReplyFile("ongo", "media/pp.jpg")
+		ReplyFile("ongo", "media/pp.jpg", sikasa.RateLimitInterval(1, 10*time.Second))
 
 	if err := bot.Start(); err != nil {
 		log.Fatalf("start bot: %v", err)

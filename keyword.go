@@ -79,12 +79,13 @@ func (b *Bot) OnRegex(pattern string) *KeywordBuilder {
 Reply attaches the handler that runs when this rule matches.
 
 	params:
-	      h: the handler invoked with a *MsgCtx
+	      h:      the handler invoked with a *MsgCtx
+	      limits: optional rate limit config (e.g. sikasa.RateLimitInterval(3, time.Minute))
 	returns:
 	      *KeywordBuilder: receiver, for chaining
 */
-func (k *KeywordBuilder) Reply(h MsgHandler) *KeywordBuilder {
-	k.handler = h
+func (k *KeywordBuilder) Reply(h MsgHandler, limits ...RateLimitConfig) *KeywordBuilder {
+	k.handler = wrapMsgHandler(h, limits)
 	return k
 }
 
@@ -93,12 +94,14 @@ ReplyText is a shortcut for fixed text replies. The reply uses Discord's
 inline reply (message reference) so it links back to the user's message.
 
 	params:
-	      text: the message body to send
+	      text:   the message body to send
+	      limits: optional rate limit config
 	returns:
 	      *KeywordBuilder: receiver, for chaining
 */
-func (k *KeywordBuilder) ReplyText(text string) *KeywordBuilder {
-	k.handler = func(ctx *MsgCtx) error { return ctx.Reply(text) }
+func (k *KeywordBuilder) ReplyText(text string, limits ...RateLimitConfig) *KeywordBuilder {
+	h := func(ctx *MsgCtx) error { return ctx.Reply(text) }
+	k.handler = wrapMsgHandler(h, limits)
 	return k
 }
 
@@ -108,11 +111,13 @@ ReplyFile is a shortcut for replying with a local file attachment.
 	params:
 	      content:  optional message body sent alongside the file
 	      filePath: path to a file on disk
+	      limits:   optional rate limit config
 	returns:
 	      *KeywordBuilder: receiver, for chaining
 */
-func (k *KeywordBuilder) ReplyFile(content, filePath string) *KeywordBuilder {
-	k.handler = func(ctx *MsgCtx) error { return ctx.ReplyFile(content, filePath) }
+func (k *KeywordBuilder) ReplyFile(content, filePath string, limits ...RateLimitConfig) *KeywordBuilder {
+	h := func(ctx *MsgCtx) error { return ctx.ReplyFile(content, filePath) }
+	k.handler = wrapMsgHandler(h, limits)
 	return k
 }
 

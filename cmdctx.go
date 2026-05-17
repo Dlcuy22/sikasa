@@ -27,7 +27,7 @@ import (
 // CmdCtx is the context passed to a slash command handler.
 //
 // Key Fields:
-//   - s: the live session, exposed via Session() for advanced use
+//   - s: the live session, exposed via DiscordGo() for advanced use
 //   - i: the underlying interaction, exposed via Interaction()
 //
 // Note: Reply must be called within 3 seconds of the interaction firing.
@@ -47,8 +47,8 @@ func newCmdCtx(s *discordgo.Session, i *discordgo.InteractionCreate) *CmdCtx {
 	return &CmdCtx{s: s, i: i, opts: opts}
 }
 
-// Session returns the underlying *discordgo.Session as an escape hatch.
-func (c *CmdCtx) Session() *discordgo.Session { return c.s }
+// DiscordGo returns the underlying *discordgo.Session as an escape hatch.
+func (c *CmdCtx) DiscordGo() *discordgo.Session { return c.s }
 
 // Interaction returns the raw *discordgo.Interaction as an escape hatch.
 func (c *CmdCtx) Interaction() *discordgo.Interaction { return c.i.Interaction }

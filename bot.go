@@ -118,13 +118,13 @@ func (b *Bot) WithLogger(l *log.Logger) *Bot {
 }
 
 /*
-Session returns the underlying *discordgo.Session as an escape hatch for
+DiscordGo returns the underlying *discordgo.Session as an escape hatch for
 features the wrapper does not cover (voice, audit log, sharding, etc).
 
 	returns:
 	      *discordgo.Session: the live session; safe to use after Start()
 */
-func (b *Bot) Session() *discordgo.Session {
+func (b *Bot) DiscordGo() *discordgo.Session {
 	return b.session
 }
 

@@ -18,7 +18,7 @@ Sikasa solves this by providing a **Router/Builder pattern**, context helpers (`
 - **Auto-Sync**: Automatically registers and bulk-overwrites slash commands on startup.
 - **Keyword & Regex Router**: Easily respond to specific words or regex patterns in messages.
 - **Context Helpers**: One-liners for replying with text, embeds, local files, or fetching files from URLs.
-- **Escape Hatches**: You can always call `.Session()`, `.Interaction()`, or `.Message()` to drop down to raw `discordgo` if Sikasa doesn't cover your specific need.
+- **Escape Hatches**: You can always call `.DiscordGo()`, `.Interaction()`, or `.Message()` to drop down to raw `discordgo` if Sikasa doesn't cover your specific need.
 
 ## Installation
 

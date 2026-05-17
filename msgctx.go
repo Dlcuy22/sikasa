@@ -30,7 +30,7 @@ import (
 // MsgCtx is the context passed to a keyword or regex handler.
 //
 // Key Fields:
-//   - s: the live session, exposed via Session()
+//   - s: the live session, exposed via DiscordGo()
 //   - m: the underlying MessageCreate event, exposed via Message()
 type MsgCtx struct {
 	s *discordgo.Session
@@ -41,8 +41,8 @@ func newMsgCtx(s *discordgo.Session, m *discordgo.MessageCreate) *MsgCtx {
 	return &MsgCtx{s: s, m: m}
 }
 
-// Session returns the underlying *discordgo.Session as an escape hatch.
-func (c *MsgCtx) Session() *discordgo.Session { return c.s }
+// DiscordGo returns the underlying *discordgo.Session as an escape hatch.
+func (c *MsgCtx) DiscordGo() *discordgo.Session { return c.s }
 
 // Message returns the raw *discordgo.MessageCreate event.
 func (c *MsgCtx) Message() *discordgo.MessageCreate { return c.m }
