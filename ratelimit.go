@@ -79,12 +79,10 @@ func wrapMsgHandler(h MsgHandler, limits []RateLimitConfig) MsgHandler {
 	rl := newRateLimiter(limits[0])
 
 	return func(ctx *MsgCtx) error {
-		if ctx.Author() != nil {
-			if !rl.Allow(ctx.Author().ID) {
-				// Rate limited! We could optionally reply with a warning here,
-				// but silently dropping spam is usually better for keywords.
-				return nil
-			}
+		if !rl.Allow(ctx.Author().ID.String()) {
+			// Rate limited! We could optionally reply with a warning here,
+			// but silently dropping spam is usually better for keywords.
+			return nil
 		}
 		return h(ctx)
 	}

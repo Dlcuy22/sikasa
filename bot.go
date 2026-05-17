@@ -3,85 +3,122 @@
 // intent helpers, and the registries that command/keyword builders write into.
 //
 // Key Components:
-//   - Bot:           wraps *discordgo.Session and owns the registries
-//   - New():         constructs a Bot with sensible defaults
+//   - Bot:           wraps *bot.Client (disgo) and owns the registries
+//   - New():         constructs a Bot with sensible defaults; defers wiring
+//     until Start() so options can be appended fluently
 //   - WithIntents(): fluent setter for gateway intents
-//   - Start()/Stop(): lifecycle, opens the websocket and registers commands
+//   - Start()/Stop(): lifecycle, opens the gateway and syncs slash commands
 //
 // Dependencies:
-//   - github.com/bwmarrin/discordgo: underlying low-level binding
+//   - github.com/disgoorg/disgo:         high-level Discord bot framework
+//   - github.com/disgoorg/disgo/voice:   voice connection manager + DAVE
+//   - github.com/thomas-vilte/dave-go:   pure-Go DAVE/E2EE backend
 //
-// Error Types:
-//   - none package-specific; errors are surfaced from discordgo verbatim
+// Note: discordgo has been retired in favour of disgo because the latter is
+// the only major Go Discord library with native DAVE (E2EE) support, which
+// Discord enforces in many voice regions (close code 4017 without it).
 package sikasa
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
+	"sync"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/cache"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/handler"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
+	"github.com/thomas-vilte/dave-go/session"
 )
 
-// Intent re-exports for ergonomic use without importing discordgo directly
-// in caller code. Sikasa does not redefine the bitmask; these are aliases.
+// Intents is an alias of disgo's gateway.Intents so callers do not need to
+// import the gateway package directly for common cases.
+type Intents = gateway.Intents
+
+// Re-exported intent bundles. Pass these to WithIntents() to control which
+// gateway events the bot subscribes to.
+//
+// Note: disgo splits intents into privileged (members, presences, message
+// content) and non-privileged groups. IntentsAll OR's both together so the
+// bot subscribes to everything; this requires the privileged intents to be
+// enabled in the Developer Portal.
 const (
-	IntentsAll                 = discordgo.IntentsAll
-	IntentsAllWithoutPrivileged = discordgo.IntentsAllWithoutPrivileged
-	IntentsNone                = discordgo.IntentsNone
+	IntentsAll           = gateway.IntentsAll
+	IntentsNonPrivileged = gateway.IntentsNonPrivileged
+	IntentsPrivileged    = gateway.IntentsPrivileged
+	IntentsNone          = gateway.IntentsNone
 )
 
-// Bot is the high-level wrapper around discordgo.Session.
+// Bot is the high-level wrapper around disgo's bot.Client.
 //
 // Key Fields:
-//   - session: the underlying discordgo session, exposed via Session()
-//   - guildID: optional dev-guild for instant command sync; empty means global
-//   - cmds:    registered command builders, flushed to Discord on Start()
-//   - kws:     registered keyword matchers, evaluated on every MessageCreate
+//   - token:    raw bot token; consumed only at Start()
+//   - intents:  gateway intents bitmask
+//   - guildID:  optional dev-guild for instant command sync; zero means global
+//   - cmds:     registered command builders, flushed to Discord on Start()
+//   - kws:      registered keyword matchers, evaluated on every MessageCreate
+//   - client:   the live disgo client; nil until Start() succeeds
+//   - voices:   per-guild voice contexts, keyed by guild ID
+//   - slog:     structured logger handed to disgo (gateway, voice, REST)
 //
 // Note: Not safe for concurrent registration; build all commands and keywords
-// before calling Start(). After Start, the session itself is goroutine-safe.
+// before calling Start(). After Start, the underlying client is goroutine-safe.
 type Bot struct {
-	session *discordgo.Session
-	guildID string
+	token   string
+	intents gateway.Intents
+	guildID snowflake.ID
 	cmds    []*CommandBuilder
 	kws     []*KeywordBuilder
 	logger  *log.Logger
+	slog    *slog.Logger
+
+	client *bot.Client
+	router *handler.Mux
+
+	voices   map[snowflake.ID]*VoiceCtx
+	voicesMu sync.Mutex
 }
 
 /*
-New constructs a Bot with the given token. The token is automatically
-prefixed with "Bot " if not already prefixed; pass a raw bot token here.
+New constructs a Bot with the given token. The "Bot " prefix is added by
+disgo internally, so pass the raw token from the Developer Portal.
 
 	params:
 	      token: the Discord bot token from the Developer Portal
 	returns:
 	      *Bot:  a configured Bot ready for command/keyword registration
-	      error: if discordgo cannot construct the underlying session
+	      error: reserved for future validation; currently always nil
 */
 func New(token string) (*Bot, error) {
-	if len(token) > 4 && token[:4] != "Bot " && token[:7] != "Bearer " {
-		token = "Bot " + token
-	}
-	s, err := discordgo.New(token)
-	if err != nil {
-		return nil, fmt.Errorf("sikasa: %w", err)
+	if token == "" {
+		return nil, fmt.Errorf("sikasa: empty token")
 	}
 	return &Bot{
-		session: s,
+		token:   token,
+		intents: gateway.IntentsNone,
 		logger:  log.Default(),
+		voices:  make(map[snowflake.ID]*VoiceCtx),
 	}, nil
 }
 
 /*
-WithIntents sets the gateway intents on the session. Must be called before Start().
+WithIntents sets the gateway intents. Must be called before Start().
 
 	params:
-	      intents: bitmask of discordgo.Intent values
+	      intents: bitmask of gateway.Intent values
 	returns:
 	      *Bot: receiver, for chaining
 */
-func (b *Bot) WithIntents(intents discordgo.Intent) *Bot {
-	b.session.Identify.Intents = intents
+func (b *Bot) WithIntents(intents gateway.Intents) *Bot {
+	b.intents = intents
 	return b
 }
 
@@ -91,21 +128,30 @@ commands sync instantly, which is ideal during development. Leave unset
 for global commands (which can take up to an hour to propagate).
 
 	params:
-	      guildID: the Discord guild snowflake to scope commands to
+	      guildID: the Discord guild snowflake; accepts the same string form
+	               that the Developer Portal and Discord client display
 	returns:
 	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithGuild(guildID string) *Bot {
-	b.guildID = guildID
+	if guildID == "" {
+		b.guildID = 0
+		return b
+	}
+	id, err := snowflake.Parse(guildID)
+	if err != nil {
+		b.logger.Printf("sikasa: invalid guild id %q: %v", guildID, err)
+		return b
+	}
+	b.guildID = id
 	return b
 }
 
 /*
-WithLogger swaps the default logger. Useful for routing bot logs through
-slog or a structured logger.
+WithLogger swaps the default logger. Pass nil to silence output.
 
 	params:
-	      l: standard library logger; pass nil to silence
+	      l: standard library logger
 	returns:
 	      *Bot: receiver, for chaining
 */
@@ -118,103 +164,182 @@ func (b *Bot) WithLogger(l *log.Logger) *Bot {
 }
 
 /*
-DiscordGo returns the underlying *discordgo.Session as an escape hatch for
-features the wrapper does not cover (voice, audit log, sharding, etc).
+WithSlog sets the structured logger that gets handed to disgo (gateway,
+voice, REST). Use this to surface heartbeat warnings, voice state changes,
+and DAVE/E2EE handshake details. Pass nil to disable.
 
+	params:
+	      l: a *slog.Logger; level controls verbosity
 	returns:
-	      *discordgo.Session: the live session; safe to use after Start()
+	      *Bot: receiver, for chaining
 */
-func (b *Bot) DiscordGo() *discordgo.Session {
-	return b.session
+func (b *Bot) WithSlog(l *slog.Logger) *Bot {
+	b.slog = l
+	return b
 }
 
 /*
-Start opens the gateway connection, attaches dispatchers, and bulk-overwrites
-all registered slash commands.
+WithVerbose enables debug-level structured logging on stderr for both the
+sikasa wrapper and the underlying disgo client. Useful when diagnosing
+voice-region issues, slow interaction acks, or gateway zombies.
 
 	returns:
-	      error: if the gateway fails to open or command registration fails
-	note: Blocks only briefly to bring the session online; events run in goroutines.
+	      *Bot: receiver, for chaining
+*/
+func (b *Bot) WithVerbose() *Bot {
+	b.slog = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level:     slog.LevelDebug,
+		AddSource: true,
+	}))
+	return b
+}
+
+/*
+Disgo returns the underlying *bot.Client as an escape hatch for features the
+wrapper does not cover (sharding, manual REST calls, advanced events, etc).
+Returns nil before Start() has been called.
+
+	returns:
+	      *bot.Client: the live disgo client, or nil if the bot has not started
+*/
+func (b *Bot) Disgo() *bot.Client {
+	return b.client
+}
+
+/*
+Voice returns the bot's VoiceManager, the entry point for joining voice
+channels and starting playback.
+
+	returns:
+	      *VoiceManager: helper for voice channel operations
+*/
+func (b *Bot) Voice() *VoiceManager {
+	return &VoiceManager{bot: b}
+}
+
+/*
+Start builds the disgo client, opens the gateway, syncs slash commands, and
+wires up keyword/message dispatchers. Returns once the gateway handshake is
+complete; events run in disgo-managed goroutines from there.
+
+	returns:
+	      error: if client construction, gateway open, or command sync fails
 */
 func (b *Bot) Start() error {
-	b.session.AddHandler(b.dispatchInteraction)
-	b.session.AddHandler(b.dispatchMessage)
+	b.router = handler.New()
 
-	if err := b.session.Open(); err != nil {
+	for _, c := range b.cmds {
+		if c.handler == nil {
+			continue
+		}
+		c.register(b)
+	}
+
+	opts := []bot.ConfigOpt{
+		bot.WithGatewayConfigOpts(
+			gateway.WithIntents(b.intents),
+		),
+		bot.WithCacheConfigOpts(
+			cache.WithCaches(cache.FlagGuilds | cache.FlagVoiceStates),
+		),
+		bot.WithVoiceManagerConfigOpts(
+			voice.WithDaveSessionCreateFunc(session.New),
+		),
+		// Async dispatch is critical for voice: conn.Open() blocks waiting
+		// for VoiceServerUpdate from the gateway. Without async events the
+		// gateway listener loop deadlocks against the slash command handler
+		// that called conn.Open(), and Discord shows "did not respond".
+		bot.WithEventManagerConfigOpts(
+			bot.WithAsyncEventsEnabled(),
+		),
+		bot.WithEventListeners(b.router),
+		bot.WithEventListenerFunc(b.dispatchKeywords),
+	}
+	if b.slog != nil {
+		opts = append(opts, bot.WithLogger(b.slog))
+	}
+
+	client, err := disgo.New(b.token, opts...)
+	if err != nil {
+		return fmt.Errorf("sikasa: build client: %w", err)
+	}
+	b.client = client
+
+	if err := client.OpenGateway(context.TODO()); err != nil {
+		client.Close(context.TODO())
 		return fmt.Errorf("sikasa: open gateway: %w", err)
 	}
 
 	if err := b.syncCommands(); err != nil {
-		// Close to avoid leaking a half-initialized session on failure.
-		_ = b.session.Close()
+		client.Close(context.TODO())
 		return err
 	}
 
-	b.logger.Printf("sikasa: bot online as %s", b.session.State.User.String())
+	b.logger.Printf("sikasa: bot online")
 	return nil
 }
 
 /*
-Stop closes the gateway connection. Always call this via defer after Start().
+Stop closes voice connections and the gateway. Always call this via defer
+after Start().
 
 	returns:
-	      error: if the underlying close fails
+	      error: reserved for future error paths; currently always nil
 */
 func (b *Bot) Stop() error {
-	return b.session.Close()
+	b.voicesMu.Lock()
+	for _, vctx := range b.voices {
+		_ = vctx.Stop()
+		if vctx.conn != nil {
+			vctx.conn.Close(context.TODO())
+		}
+	}
+	b.voices = make(map[snowflake.ID]*VoiceCtx)
+	b.voicesMu.Unlock()
+
+	if b.client != nil {
+		b.client.Close(context.TODO())
+	}
+	return nil
 }
 
-// syncCommands flushes all registered command builders to Discord using
-// BulkOverwrite, which atomically replaces the command set and removes
-// any stale commands from previous runs.
+// syncCommands flushes registered command builders to Discord. handler.SyncCommands
+// performs an atomic bulk overwrite, so stale commands from previous runs are
+// removed automatically.
 func (b *Bot) syncCommands() error {
 	if len(b.cmds) == 0 {
 		return nil
 	}
-	apps := make([]*discordgo.ApplicationCommand, 0, len(b.cmds))
+	cmds := make([]discord.ApplicationCommandCreate, 0, len(b.cmds))
 	for _, c := range b.cmds {
-		apps = append(apps, c.build())
+		cmds = append(cmds, c.build())
 	}
-	_, err := b.session.ApplicationCommandBulkOverwrite(b.session.State.User.ID, b.guildID, apps)
-	if err != nil {
-		return fmt.Errorf("sikasa: register commands: %w", err)
+	var guildIDs []snowflake.ID
+	if b.guildID != 0 {
+		guildIDs = []snowflake.ID{b.guildID}
 	}
-	b.logger.Printf("sikasa: registered %d command(s)", len(apps))
+	if err := handler.SyncCommands(b.client, cmds, guildIDs); err != nil {
+		return fmt.Errorf("sikasa: sync commands: %w", err)
+	}
+	b.logger.Printf("sikasa: registered %d command(s)", len(cmds))
 	return nil
 }
 
-// dispatchInteraction routes incoming interactions to the matching builder.
-// Currently handles application commands; component / modal routing can be
-// added later without breaking the existing API.
-func (b *Bot) dispatchInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
+// dispatchKeywords runs every registered keyword rule against an inbound
+// message. Self-messages and bot messages are filtered to prevent loops.
+func (b *Bot) dispatchKeywords(e *events.MessageCreate) {
+	if e.Message.Author.Bot {
 		return
 	}
-	name := i.ApplicationCommandData().Name
-	for _, c := range b.cmds {
-		if c.name == name && c.handler != nil {
-			ctx := newCmdCtx(s, i)
-			if err := c.handler(ctx); err != nil {
-				b.logger.Printf("sikasa: command %q error: %v", name, err)
-			}
-			return
-		}
-	}
-}
-
-// dispatchMessage walks the keyword registry on every MessageCreate.
-// Self-messages are ignored to prevent feedback loops.
-func (b *Bot) dispatchMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author == nil || m.Author.ID == s.State.User.ID {
+	if b.client != nil && e.Message.Author.ID == b.client.ID() {
 		return
 	}
+	ctx := newMsgCtx(b, e)
 	for _, kw := range b.kws {
-		if kw.matches(m.Content) {
-			ctx := newMsgCtx(s, m)
+		if kw.matches(e.Message.Content) {
 			if err := kw.fire(ctx); err != nil {
 				b.logger.Printf("sikasa: keyword %v error: %v", kw.terms, err)
 			}
-			// Continue evaluating; multiple keyword rules can fire on one message.
 		}
 	}
 }
@@ -223,3 +348,15 @@ func (b *Bot) dispatchMessage(s *discordgo.Session, m *discordgo.MessageCreate) 
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// vlog returns a structured logger for sikasa's own internal events. If the
+// caller installed one via WithSlog/WithVerbose, that logger is used; otherwise
+// a discard handler keeps things quiet.
+func (b *Bot) vlog() *slog.Logger {
+	if b.slog != nil {
+		return b.slog
+	}
+	return slog.New(slog.NewTextHandler(discardWriter{}, &slog.HandlerOptions{
+		Level: slog.LevelError + 1, // effectively off
+	}))
+}

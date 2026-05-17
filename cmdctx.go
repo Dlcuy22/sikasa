@@ -1,18 +1,21 @@
 // Package sikasa: cmdctx.go
 // Purpose: Defines CmdCtx, the per-invocation context passed to slash command
-// handlers. Bundles the underlying session and interaction with reply helpers
-// for text, embeds, and media so handlers stay one-liners.
+// handlers. Bundles the disgo handler.CommandEvent and SlashCommandInteractionData
+// with reply helpers for text, embeds, and media so handlers stay one-liners.
 //
 // Key Components:
 //   - CmdCtx:       per-invocation handler context
-//   - newCmdCtx():  internal constructor; called by the bot's dispatcher
+//   - newCmdCtx():  internal constructor; called by command.go's router glue
 //   - Reply / ReplyEmbed / ReplyFile / ReplyURL: response helpers
 //   - String / Int / Bool / User / Channel / Attachment: option accessors
 //   - Defer / Followup: long-running command pattern
 //
 // Dependencies:
-//   - github.com/bwmarrin/discordgo: Interaction, InteractionResponse types
-//   - net/http, os, path/filepath: file-attachment helpers
+//   - github.com/disgoorg/disgo/discord:  message, embed, and option types
+//   - github.com/disgoorg/disgo/handler:  CommandEvent, the response surface
+//
+// Note: Reply must be called within 3 seconds of the interaction firing;
+// otherwise call Defer() first and finish with Followup().
 package sikasa
 
 import (
@@ -21,111 +24,77 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/handler"
 )
 
 // CmdCtx is the context passed to a slash command handler.
 //
 // Key Fields:
-//   - s: the live session, exposed via DiscordGo() for advanced use
-//   - i: the underlying interaction, exposed via Interaction()
-//
-// Note: Reply must be called within 3 seconds of the interaction firing.
-// For longer work, call Defer() first and use Followup() afterwards.
+//   - bot:   the parent Bot, exposed via Bot()
+//   - event: the disgo CommandEvent, exposed via Event()
+//   - data:  the parsed slash command interaction data
 type CmdCtx struct {
-	s    *discordgo.Session
-	i    *discordgo.InteractionCreate
-	opts map[string]*discordgo.ApplicationCommandInteractionDataOption
+	bot   *Bot
+	event *handler.CommandEvent
+	data  discord.SlashCommandInteractionData
 }
 
-// newCmdCtx builds a CmdCtx and pre-indexes the option list for O(1) lookup.
-func newCmdCtx(s *discordgo.Session, i *discordgo.InteractionCreate) *CmdCtx {
-	opts := make(map[string]*discordgo.ApplicationCommandInteractionDataOption)
-	for _, o := range i.ApplicationCommandData().Options {
-		opts[o.Name] = o
-	}
-	return &CmdCtx{s: s, i: i, opts: opts}
+// newCmdCtx wires a CmdCtx for the given event/data pair.
+func newCmdCtx(b *Bot, e *handler.CommandEvent, data discord.SlashCommandInteractionData) *CmdCtx {
+	return &CmdCtx{bot: b, event: e, data: data}
 }
 
-// DiscordGo returns the underlying *discordgo.Session as an escape hatch.
-func (c *CmdCtx) DiscordGo() *discordgo.Session { return c.s }
+// Bot returns the parent Bot.
+func (c *CmdCtx) Bot() *Bot { return c.bot }
 
-// Interaction returns the raw *discordgo.Interaction as an escape hatch.
-func (c *CmdCtx) Interaction() *discordgo.Interaction { return c.i.Interaction }
+// Event returns the underlying disgo *handler.CommandEvent as an escape hatch
+// for advanced response patterns (UpdateInteractionResponse, file followups,
+// etc).
+func (c *CmdCtx) Event() *handler.CommandEvent { return c.event }
+
+// Data returns the parsed slash command interaction data, useful when the
+// option helpers below are insufficient (e.g. iterating Resolved entities).
+func (c *CmdCtx) Data() discord.SlashCommandInteractionData { return c.data }
 
 // Author returns the user who invoked the command, regardless of whether
-// the invocation happened in a guild (Member.User) or in DMs (User).
-func (c *CmdCtx) Author() *discordgo.User {
-	if c.i.Member != nil && c.i.Member.User != nil {
-		return c.i.Member.User
-	}
-	return c.i.User
+// the invocation happened in a guild or in DMs.
+func (c *CmdCtx) Author() discord.User {
+	return c.event.User()
 }
 
 // ChannelID returns the channel where the command was invoked.
-func (c *CmdCtx) ChannelID() string { return c.i.ChannelID }
+func (c *CmdCtx) ChannelID() string {
+	return c.event.Channel().ID().String()
+}
 
-// GuildID returns the guild snowflake, or empty string for DM invocations.
-func (c *CmdCtx) GuildID() string { return c.i.GuildID }
-
-// String returns the string value for the named option, or "" if missing.
-func (c *CmdCtx) String(name string) string {
-	if o, ok := c.opts[name]; ok {
-		return o.StringValue()
+// GuildID returns the guild snowflake as a string, or empty for DM invocations.
+func (c *CmdCtx) GuildID() string {
+	if id := c.event.GuildID(); id != nil {
+		return id.String()
 	}
 	return ""
 }
 
+// String returns the string value for the named option, or "" if missing.
+func (c *CmdCtx) String(name string) string { return c.data.String(name) }
+
 // Int returns the integer value for the named option, or 0 if missing.
-func (c *CmdCtx) Int(name string) int64 {
-	if o, ok := c.opts[name]; ok {
-		return o.IntValue()
-	}
-	return 0
-}
+func (c *CmdCtx) Int(name string) int64 { return int64(c.data.Int(name)) }
 
 // Bool returns the boolean value for the named option, or false if missing.
-func (c *CmdCtx) Bool(name string) bool {
-	if o, ok := c.opts[name]; ok {
-		return o.BoolValue()
-	}
-	return false
-}
+func (c *CmdCtx) Bool(name string) bool { return c.data.Bool(name) }
 
-// User returns the picked user for the named option, resolved against
-// the interaction's resolved-data, or nil if missing.
-func (c *CmdCtx) User(name string) *discordgo.User {
-	if o, ok := c.opts[name]; ok {
-		return o.UserValue(c.s)
-	}
-	return nil
-}
+// User returns the picked user for the named option, or the zero User if missing.
+func (c *CmdCtx) User(name string) discord.User { return c.data.User(name) }
 
-// Channel returns the picked channel for the named option, or nil if missing.
-func (c *CmdCtx) Channel(name string) *discordgo.Channel {
-	if o, ok := c.opts[name]; ok {
-		return o.ChannelValue(c.s)
-	}
-	return nil
-}
+// Channel returns the picked channel for the named option, or the zero
+// ResolvedChannel if missing.
+func (c *CmdCtx) Channel(name string) discord.ResolvedChannel { return c.data.Channel(name) }
 
-// Attachment returns the uploaded attachment for the named option, resolved
-// from the interaction's Resolved.Attachments map, or nil if missing.
-func (c *CmdCtx) Attachment(name string) *discordgo.MessageAttachment {
-	o, ok := c.opts[name]
-	if !ok {
-		return nil
-	}
-	id, _ := o.Value.(string)
-	if id == "" {
-		return nil
-	}
-	resolved := c.i.ApplicationCommandData().Resolved
-	if resolved == nil || resolved.Attachments == nil {
-		return nil
-	}
-	return resolved.Attachments[id]
-}
+// Attachment returns the uploaded attachment for the named option, or the
+// zero Attachment if missing.
+func (c *CmdCtx) Attachment(name string) discord.Attachment { return c.data.Attachment(name) }
 
 /*
 Reply sends a plain-text response to the interaction. Must run within
@@ -134,13 +103,10 @@ Reply sends a plain-text response to the interaction. Must run within
 	params:
 	      text: the message body
 	returns:
-	      error: from discordgo
+	      error: from disgo
 */
 func (c *CmdCtx) Reply(text string) error {
-	return c.s.InteractionRespond(c.i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: text},
-	})
+	return c.event.CreateMessage(discord.NewMessageCreate().WithContent(text))
 }
 
 /*
@@ -149,38 +115,29 @@ ReplyEphemeral is like Reply but the response is visible only to the invoker.
 	params:
 	      text: the message body
 	returns:
-	      error: from discordgo
+	      error: from disgo
 */
 func (c *CmdCtx) ReplyEphemeral(text string) error {
-	return c.s.InteractionRespond(c.i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: text,
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
+	return c.event.CreateMessage(discord.NewMessageCreate().
+		WithContent(text).
+		WithFlags(discord.MessageFlagEphemeral))
 }
 
 /*
 ReplyEmbed sends an embed response.
 
 	params:
-	      embed: a fully-built MessageEmbed
+	      embed: a fully-built Embed
 	returns:
-	      error: from discordgo
+	      error: from disgo
 */
-func (c *CmdCtx) ReplyEmbed(embed *discordgo.MessageEmbed) error {
-	return c.s.InteractionRespond(c.i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
-		},
-	})
+func (c *CmdCtx) ReplyEmbed(embed discord.Embed) error {
+	return c.event.CreateMessage(discord.NewMessageCreate().AddEmbeds(embed))
 }
 
 /*
 ReplyFile sends a local file as a response. The file is opened, attached,
-and closed automatically.
+and closed by Discord after upload.
 
 	params:
 	      content:  optional message body
@@ -194,16 +151,9 @@ func (c *CmdCtx) ReplyFile(content, filePath string) error {
 		return fmt.Errorf("sikasa: open %s: %w", filePath, err)
 	}
 	defer f.Close()
-	return c.s.InteractionRespond(c.i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: content,
-			Files: []*discordgo.File{{
-				Name:   filepath.Base(filePath),
-				Reader: f,
-			}},
-		},
-	})
+	return c.event.CreateMessage(discord.NewMessageCreate().
+		WithContent(content).
+		AddFile(filepath.Base(filePath), "", f))
 }
 
 /*
@@ -226,16 +176,9 @@ func (c *CmdCtx) ReplyURL(content, url, fileName string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("sikasa: fetch %s: status %d", url, resp.StatusCode)
 	}
-	return c.s.InteractionRespond(c.i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: content,
-			Files: []*discordgo.File{{
-				Name:   fileName,
-				Reader: resp.Body,
-			}},
-		},
-	})
+	return c.event.CreateMessage(discord.NewMessageCreate().
+		WithContent(content).
+		AddFile(fileName, "", resp.Body))
 }
 
 /*
@@ -247,17 +190,10 @@ interaction response directly.
 	params:
 	      ephemeral: if true, the eventual response is visible only to the invoker
 	returns:
-	      error: from discordgo
+	      error: from disgo
 */
 func (c *CmdCtx) Defer(ephemeral bool) error {
-	data := &discordgo.InteractionResponseData{}
-	if ephemeral {
-		data.Flags = discordgo.MessageFlagsEphemeral
-	}
-	return c.s.InteractionRespond(c.i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-		Data: data,
-	})
+	return c.event.DeferCreateMessage(ephemeral)
 }
 
 /*
@@ -267,11 +203,9 @@ follow-ups for up to 15 minutes after the original interaction.
 	params:
 	      text: the follow-up body
 	returns:
-	      error: from discordgo
+	      error: from disgo
 */
 func (c *CmdCtx) Followup(text string) error {
-	_, err := c.s.FollowupMessageCreate(c.i.Interaction, true, &discordgo.WebhookParams{
-		Content: text,
-	})
+	_, err := c.event.CreateFollowupMessage(discord.NewMessageCreate().WithContent(text))
 	return err
 }
