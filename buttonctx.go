@@ -27,19 +27,24 @@ import (
 // ButtonCtx is the context passed to a Bot.OnButton handler.
 //
 // Key Fields:
-//   - bot:     parent Bot, exposed via Bot()
-//   - event:   the disgo *handler.ComponentEvent, exposed via Event()
-//   - data:    the button interaction data
-//   - vars:    path variables extracted from the customID pattern
+//   - bot:      parent Bot, exposed via Bot()
+//   - event:    the disgo *handler.ComponentEvent, exposed via Event()
+//   - data:     the button interaction data
+//   - vars:     path variables extracted from the customID pattern
+//   - deferred: tracks whether the handler has called DeferUpdate, so
+//               subsequent Update/UpdateEmbed/ClearComponents go through the
+//               followup-style UpdateInteractionResponse instead of trying to
+//               respond a second time
 //
 // Note: ButtonCtx values are constructed by the dispatcher; do not build
 // them yourself. The embedded *handler.ComponentEvent is exposed as an
 // escape hatch for advanced use (followups, file uploads, modals).
 type ButtonCtx struct {
-	bot   *Bot
-	event *handler.ComponentEvent
-	data  discord.ButtonInteractionData
-	vars  map[string]string
+	bot      *Bot
+	event    *handler.ComponentEvent
+	data     discord.ButtonInteractionData
+	vars     map[string]string
+	deferred bool
 }
 
 // Bot returns the parent Bot.
@@ -139,6 +144,8 @@ Update edits the message that owns the clicked button. Useful for
 swapping a picker into a confirmation. Pass an empty string to clear the
 content; existing embeds and components are preserved unless cleared
 explicitly via Event().UpdateMessage with the appropriate ClearX calls.
+After DeferUpdate has been called, this method edits the deferred response
+instead of issuing a fresh one.
 
 	params:
 	      text: new message body
@@ -146,14 +153,19 @@ explicitly via Event().UpdateMessage with the appropriate ClearX calls.
 	      error: from disgo
 */
 func (c *ButtonCtx) Update(text string) error {
-	return c.event.UpdateMessage(discord.NewMessageUpdate().
-		WithContent(text))
+	upd := discord.NewMessageUpdate().WithContent(text)
+	if c.deferred {
+		_, err := c.event.UpdateInteractionResponse(upd)
+		return err
+	}
+	return c.event.UpdateMessage(upd)
 }
 
 /*
 UpdateEmbed edits the message to display the given embed and clears all
 component rows so the picker disappears once a choice is made. Accepts a
-discord.Embed or a *EmbedBuilder.
+discord.Embed or a *EmbedBuilder. After DeferUpdate has been called, the
+edit is dispatched against the deferred response.
 
 	params:
 	      embed: a discord.Embed or *EmbedBuilder
@@ -165,9 +177,14 @@ func (c *ButtonCtx) UpdateEmbed(embed any) error {
 	if err != nil {
 		return err
 	}
-	return c.event.UpdateMessage(discord.NewMessageUpdate().
+	upd := discord.NewMessageUpdate().
 		WithEmbeds(e).
-		ClearComponents())
+		ClearComponents()
+	if c.deferred {
+		_, err = c.event.UpdateInteractionResponse(upd)
+		return err
+	}
+	return c.event.UpdateMessage(upd)
 }
 
 /*
@@ -179,8 +196,33 @@ the surrounding context stays visible.
 	      error: from disgo
 */
 func (c *ButtonCtx) ClearComponents() error {
-	return c.event.UpdateMessage(discord.NewMessageUpdate().
-		ClearComponents())
+	upd := discord.NewMessageUpdate().ClearComponents()
+	if c.deferred {
+		_, err := c.event.UpdateInteractionResponse(upd)
+		return err
+	}
+	return c.event.UpdateMessage(upd)
+}
+
+/*
+DeferUpdate acks the click within Discord's 3 second window without
+visibly changing the message. Use it before doing slow work (yt-dlp probe,
+voice handshake, etc.) that would otherwise leave the user staring at
+"this interaction failed". After this call, Update / UpdateEmbed /
+ClearComponents transparently target the deferred response.
+
+	returns:
+	      error: from disgo
+*/
+func (c *ButtonCtx) DeferUpdate() error {
+	if c.deferred {
+		return nil
+	}
+	if err := c.event.DeferUpdateMessage(); err != nil {
+		return err
+	}
+	c.deferred = true
+	return nil
 }
 
 /*

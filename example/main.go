@@ -130,16 +130,14 @@ func main() {
 
 	bot.OnPrefix("yt", "Plays or queues a YouTube URL, playlist, or search query").
 		Aliases("youtube").
-		IntArg("results", "number of search results to show (default 3, max 5)", false).
-		StringArg("query", "URL or search query", true).
+		StringArg("query", "URL or search query (prefix with a number for top-N picker)", true).
 		Handle(func(ctx *sikasa.PrefixCtx) error {
 			return runYouTubePrefix(ctx, sikasa.YTSearchModeEnqueue)
 		})
 
 	bot.OnPrefix("insert", "Insert a YouTube URL or search result right after the current track").
 		Aliases("ins", "playnext").
-		IntArg("results", "number of search results to show (default 3, max 5)", false).
-		StringArg("query", "URL or search query", true).
+		StringArg("query", "URL or search query (prefix with a number for top-N picker)", true).
 		Handle(func(ctx *sikasa.PrefixCtx) error {
 			return runYouTubePrefix(ctx, sikasa.YTSearchModeInsertNext)
 		})
@@ -425,10 +423,13 @@ func parseNumber(s string) (float64, error) {
 }
 
 /*
-runYouTubePrefix is the shared body of k!yt and k!insert. It branches on
-whether the user passed a URL or a free-text query and on the requested
-mode (enqueue vs insert-next), so both prefix commands share one
-implementation.
+runYouTubePrefix is the shared body of k!yt and k!insert. Branches on
+URL vs free-text query, and on whether the user prefixed the query with a
+result count:
+
+  - URL                 -> direct PlayYouTube / InsertNextYouTube
+  - "<n> <query>"       -> show picker with top-N candidates and buttons
+  - "<query>"           -> silently take the top-1 result, no picker
 
 	params:
 	      ctx:  prefix command context
@@ -441,18 +442,69 @@ func runYouTubePrefix(ctx *sikasa.PrefixCtx, mode sikasa.YTSearchMode) error {
 	if err != nil {
 		return ctx.Reply(err.Error())
 	}
-	query := ctx.String("query")
+	query := strings.TrimSpace(ctx.String("query"))
 	if sikasa.IsHTTPURL(query) {
 		return playYouTubeURL(ctx, vctx, query, mode)
 	}
-	n := int(ctx.Int("results"))
-	if n <= 0 {
-		n = 3
+
+	n, rest := parseLeadingCount(query)
+	if n == 0 {
+		// No count given: take top-1 silently.
+		return playTopSearchResult(ctx, vctx, query, mode)
 	}
 	if n > 5 {
 		n = 5
 	}
-	return showYouTubeSearch(ctx, query, n, mode)
+	return showYouTubeSearch(ctx, rest, n, mode)
+}
+
+/*
+parseLeadingCount extracts an optional leading integer from a query
+("3 vivarium ado" -> 3, "vivarium ado"). Bare numeric tokens that look
+more like a query than a count (e.g. "1984") still count as a leading
+count when followed by another token; that is the user's call by
+convention.
+
+	params:
+	      query: raw query string
+	returns:
+	      int:    parsed leading count, or 0 when no leading integer
+	      string: query with the leading count stripped
+*/
+func parseLeadingCount(query string) (int, string) {
+	parts := strings.SplitN(query, " ", 2)
+	if len(parts) < 2 {
+		return 0, query
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil || n < 1 {
+		return 0, query
+	}
+	return n, strings.TrimSpace(parts[1])
+}
+
+/*
+playTopSearchResult fetches yt-dlp's top hit for query and routes it
+through the chosen mode without producing a picker. Used when k!yt is
+called without an explicit result count.
+
+	params:
+	      ctx:   prefix command context
+	      vctx:  active voice handle
+	      query: free-text search string
+	      mode:  enqueue or insert-next
+	returns:
+	      error: from yt-dlp or voice ops
+*/
+func playTopSearchResult(ctx *sikasa.PrefixCtx, vctx *sikasa.VoiceCtx, query string, mode sikasa.YTSearchMode) error {
+	results, err := sikasa.SearchYouTube(query, 1)
+	if err != nil {
+		return ctx.Reply("search error: " + err.Error())
+	}
+	if len(results) == 0 {
+		return ctx.Reply("no results for: " + query)
+	}
+	return playYouTubeURL(ctx, vctx, results[0].Source, mode)
 }
 
 /*
@@ -570,13 +622,27 @@ func handleYTSearchClick(ctx *sikasa.ButtonCtx) error {
 	}
 	track := session.Tracks()[idx]
 
+	// Voice handshake + yt-dlp probe blow past the 3 second interaction
+	// window, so ack the click immediately and edit the response after
+	// the slow work returns. Without this Discord shows "interaction
+	// failed" even though the track lands in the queue.
+	if err := ctx.DeferUpdate(); err != nil {
+		return err
+	}
+
 	state, ok := ctx.Bot().Disgo().Caches.VoiceState(session.GuildID(), session.InvokerID())
 	if !ok || state.ChannelID == nil {
-		return ctx.Reply("you must be in a voice channel first")
+		return ctx.UpdateEmbed(sikasa.NewEmbed().
+			Title("Pick failed").
+			Color(0xED4245).
+			Description("you must be in a voice channel first"))
 	}
 	vctx, err := ctx.Bot().Voice().Join(session.GuildID().String(), state.ChannelID.String())
 	if err != nil {
-		return ctx.Reply("join error: " + err.Error())
+		return ctx.UpdateEmbed(sikasa.NewEmbed().
+			Title("Pick failed").
+			Color(0xED4245).
+			Description("join error: " + err.Error()))
 	}
 	vctx.SetAnnounceChannel(ctx.ChannelID())
 
@@ -594,7 +660,10 @@ func handleYTSearchClick(ctx *sikasa.ButtonCtx) error {
 		pos, _, started, err = vctx.PlayYouTube(track.Source)
 	}
 	if err != nil {
-		return ctx.Reply("play error: " + err.Error())
+		return ctx.UpdateEmbed(sikasa.NewEmbed().
+			Title("Pick failed").
+			Color(0xED4245).
+			Description("play error: " + err.Error()))
 	}
 
 	embed := sikasa.NewEmbed().
