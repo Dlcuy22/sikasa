@@ -22,6 +22,7 @@ Sikasa solves this by providing a **Builder pattern**, context helpers (`CmdCtx`
 - **Keyword & Regex Router**: Easily respond to specific words or regex patterns in messages.
 - **Context Helpers**: One-liners for replying with text, embeds, local files, or fetching files from URLs.
 - **Voice / Music with DAVE**: Join voice channels and stream local files or YouTube URLs with a single call. End-to-end encryption is wired in for you.
+- **Per-guild Queue**: Built-in track queue with auto-advance, skip, prev, and clear. Each guild gets its own session, so multi-server playback is isolated by default.
 - **Rate Limiting**: Optional sliding-window rate limit on keyword replies.
 - **Sentinel Errors**: Exported `Err*` values so callers can branch on `errors.Is(err, sikasa.ErrXxx)`.
 - **Escape Hatches**: Drop down to disgo via `.Disgo()`, `.Event()`, or `.Data()` if Sikasa doesn't cover your specific need.
@@ -150,6 +151,23 @@ bot.OnRegex(`(?i)^ping\s+\d+$`).
 - `ctx.Reply("text")` (Sends as an inline reply to the user)
 - `ctx.Send("text")` (Sends a normal message to the channel)
 - `ctx.ReplyFile()`, `ctx.ReplyURL()`, `ctx.React("👍")`
+- `ctx.NewEmbed()` returns a fluent `*EmbedBuilder`; pass it to `ctx.ReplyEmbed()` or `ctx.SendEmbed()` directly (no `.Build()` needed)
+
+```go
+bot.OnKeyword("status").Reply(func(ctx *sikasa.MsgCtx) error {
+    embed := ctx.NewEmbed().
+        Title("Status").
+        Color(0x57F287).
+        Description("All systems nominal").
+        Field("Region", "us-west", true).
+        Field("Latency", "42ms", true).
+        Footer("updated just now", "").
+        Now()
+    return ctx.SendEmbed(embed)
+})
+```
+
+The builder mirrors Discord's embed shape: `Title / Description / URL / Color / Author / Footer / Thumbnail / Image / Field / Timestamp`. For long content, clamp with `sikasa.Truncate(s, sikasa.EmbedDescriptionMaxLen)` (or `EmbedFieldValueMaxLen` etc.) so a single overflow does not 400 the whole reply.
 
 ### Prefix Commands (`PrefixCtx`)
 
@@ -185,6 +203,16 @@ bot.OnPrefix("add", "Adds two integers").
 - Command name lookup is case-insensitive (`!Echo` works); the prefix itself is case-sensitive.
 - When a message starts with the prefix, **keyword matchers do not fire** for that message, preventing double-responses.
 - Unknown commands reply with `sikasa: unknown prefix command: !xxx`. Missing required args reply with `sikasa: missing required argument: name`.
+- `RequireSameVoice()` gates a command on the invoker being in the same voice channel as the bot. When the bot is not in any voice channel for the guild the gate passes (so initial-join commands still work). On rejection the user gets `sikasa: you must be in the same voice channel as the bot`.
+
+```go
+bot.OnPrefix("skip", "Skip to the next track").
+    RequireSameVoice().
+    Handle(func(ctx *sikasa.PrefixCtx) error {
+        // only reachable when the user is in the bot's voice channel
+        return nil
+    })
+```
 
 **Hybrid Argument Access:**
 
@@ -234,13 +262,51 @@ YouTube playback (requires `yt-dlp`):
 vctx.PlayYouTube("https://youtu.be/dQw4w9WgXcQ")
 ```
 
-Control:
+Playlists, channels, and any other multi-entry yt-dlp URL are expanded automatically. A single `PlayYouTube` call appends every entry to the queue in order, so passing `youtube.com/playlist?list=...` enqueues the whole list at once.
+
+```go
+firstPos, added, started, err := vctx.PlayYouTube(playlistURL)
+// added = number of tracks appended (1 for a single video)
+// started = true if the first track is now playing
+// firstPos = index of the first appended track
+```
+
+Each Track in the queue carries `Title` and `Author` (uploader/channel) populated from yt-dlp, so reach for `track.Label()` (`"Title by Author"`) when displaying the queue. This keeps replies clean and avoids Discord's auto-embed spam on raw URLs.
+
+`PlayFile` enqueues a local file and returns `(pos, started, err)`. Tracks auto-advance on natural EOF, so a multi-track queue plays straight through without manual prompting.
+
+```go
+pos, started, err := vctx.PlayFile("song.mp3")
+if err != nil { /* ... */ }
+if started {
+    fmt.Println("playing now")
+} else {
+    fmt.Printf("queued at #%d\n", pos+1)
+}
+```
+
+Queue control:
+```go
+vctx.Skip()         // advance to the next track (alias: Next)
+vctx.Prev()         // rewind cursor by one and play that track
+vctx.Now()          // (Track, ok) — currently loaded track
+vctx.Queue()        // []Track snapshot of the entire list
+vctx.Cursor()       // index of the current track, -1 if none started
+vctx.ClearQueue()   // empty the queue (current track keeps playing)
+```
+
+Per-track control:
 ```go
 vctx.Pause()
 vctx.Resume()
-vctx.Stop()    // halts current track, voice connection stays
-vctx.Leave()   // disconnects entirely
+vctx.Stop()    // halts current track; queue is preserved
+vctx.Leave()   // disconnects entirely (clears queue too)
+vctx.Reconnect() // tear down and reopen, then resume current track
 ```
+
+The bot watches its own log stream for DAVE/voice errors (`"no active epoch"`, `"failed to encrypt packet"`) and triggers `Reconnect()` automatically with a 30-second per-guild debounce. The current track is restarted from the beginning because FFmpeg is torn down with the connection. Hook your own `slog` handler via `WithSlog` to see when this happens.
+
+Multi-guild sessions are automatic: each guild gets its own `VoiceCtx` (and therefore its own queue, cursor, and FFmpeg pipeline), so the bot can play different music in two servers concurrently without any extra wiring.
 
 Retrieve an existing connection from anywhere:
 ```go
@@ -281,6 +347,9 @@ if errors.Is(err, sikasa.ErrInvalidGuildID) {
 | `ErrUnknownCommand` | Prefix dispatch finds no matching command |
 | `ErrMissingArg` | Required builder argument absent from the message |
 | `ErrInvalidArg` | Argument value fails type parsing (e.g. `IntArg` got non-numeric) |
+| `ErrQueueEmpty` | Queue navigation called on an empty queue |
+| `ErrNoPrevious` | `Prev()` called while the cursor is already at the first track |
+| `ErrNotSameChannel` | `RequireSameVoice()` gate rejected the invoker |
 
 ## Escape Hatches
 
@@ -300,7 +369,6 @@ client.Rest.CreateMessage(channelID, discord.NewMessageCreate().AddEmbeds(myEmbe
 
 Voice features deferred from this iteration:
 - Real-time **volume** control (currently fixed at 100%; would need PCM-side gain or FFmpeg restart)
-- **Queue / playlist** management
 - **AudioProvider** chaining for custom audio sources (Spotify, custom TTS, raw PCM)
 - **Voice receive** (decoding user audio; disgo exposes `OpusFrameReceiver` but Sikasa hasn't surfaced it yet)
 - **Lavalink** mode for production deployments at scale

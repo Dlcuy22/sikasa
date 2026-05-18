@@ -54,19 +54,22 @@ type prefixArg struct {
 // PrefixBuilder accumulates a prefix command's definition and handler.
 //
 // Key Fields:
-//   - name, desc: user-visible name and description (description currently
-//                 unused but reserved for a future help generator)
-//   - aliases:    extra names that resolve to this builder
-//   - args:       option list, parsed in registration order
-//   - handler:    invoked when a message matches the command
+//   - name, desc:        user-visible name and description (description currently
+//                        unused but reserved for a future help generator)
+//   - aliases:           extra names that resolve to this builder
+//   - args:              option list, parsed in registration order
+//   - handler:           invoked when a message matches the command
+//   - requireSameVoice:  when true, dispatch rejects callers who are not in
+//                        the same voice channel as the bot for the guild
 //
 // Note: Builders are not thread-safe; finish configuration before Start().
 type PrefixBuilder struct {
-	name    string
-	desc    string
-	aliases []string
-	args    []prefixArg
-	handler PrefixHandler
+	name             string
+	desc             string
+	aliases          []string
+	args             []prefixArg
+	handler          PrefixHandler
+	requireSameVoice bool
 }
 
 /*
@@ -171,6 +174,20 @@ func (p *PrefixBuilder) Handle(h PrefixHandler) *PrefixBuilder {
 	return p
 }
 
+/*
+RequireSameVoice gates the command on the invoking user being in the same
+voice channel as the bot for that guild. When the bot is not in any voice
+channel, the command is allowed (so initial join commands like "play" can
+still run).
+
+	returns:
+	      *PrefixBuilder: receiver, for chaining
+*/
+func (p *PrefixBuilder) RequireSameVoice() *PrefixBuilder {
+	p.requireSameVoice = true
+	return p
+}
+
 // indexPrefixes builds the lookup table from b.prefixes. Called once during
 // Start() after all OnPrefix() calls have completed. Panics on duplicate
 // names or aliases since that is developer error and should fail fast.
@@ -232,6 +249,13 @@ func (b *Bot) dispatchPrefix(e *events.MessageCreate) bool {
 	if perr != nil {
 		_ = mctx.Reply(perr.Error())
 		return true
+	}
+
+	if pb.requireSameVoice {
+		if err := b.checkSameVoice(e); err != nil {
+			_ = mctx.Reply(err.Error())
+			return true
+		}
 	}
 
 	pctx := &PrefixCtx{

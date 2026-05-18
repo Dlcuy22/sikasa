@@ -73,10 +73,12 @@ func main() {
 	bot.OnKeyword("karbit").
 		ReplyFile(" ", "media/karbit.jpg")
 
+	bot.OnKeyword("dongo").ReplyText("Apasih 😡")
+
 	// Prefix command examples. Triggered by the prefix set via SetPrefix("k!").
-	// !ping        -> "pong"
-	// !echo X Y Z  -> "X Y Z" (last StringArg consumes the tail)
-	// !add 2 3     -> "5"
+	// k!ping        -> "pong"
+	// k!echo X Y Z  -> "X Y Z" (last StringArg consumes the tail)
+	// k!add 2 3     -> "5"
 	bot.OnPrefix("ping", "Replies pong").
 		Handle(func(ctx *sikasa.PrefixCtx) error {
 			return ctx.Reply("pong")
@@ -106,7 +108,7 @@ func main() {
 		})
 
 	// Voice commands via prefix
-	bot.OnPrefix("play", "Plays a local audio file").
+	bot.OnPrefix("play", "Plays or queues a local audio file").
 		Aliases("p").
 		StringArg("file", "path to audio file", true).
 		Handle(func(ctx *sikasa.PrefixCtx) error {
@@ -115,13 +117,17 @@ func main() {
 				return ctx.Reply(err.Error())
 			}
 			path := ctx.String("file")
-			if err := vctx.PlayFile(path); err != nil {
+			pos, started, err := vctx.PlayFile(path)
+			if err != nil {
 				return ctx.Reply("play error: " + err.Error())
 			}
-			return ctx.Reply("now playing: `" + path + "`")
+			if started {
+				return ctx.Reply("now playing: `" + path + "`")
+			}
+			return ctx.Reply(fmt.Sprintf("queued at #%d: `%s`", pos+1, path))
 		})
 
-	bot.OnPrefix("yt", "Plays audio from a YouTube URL").
+	bot.OnPrefix("yt", "Plays or queues a YouTube URL or playlist").
 		Aliases("youtube").
 		StringArg("url", "YouTube URL", true).
 		Handle(func(ctx *sikasa.PrefixCtx) error {
@@ -130,13 +136,185 @@ func main() {
 				return ctx.Reply(err.Error())
 			}
 			url := ctx.String("url")
-			if err := vctx.PlayYouTube(url); err != nil {
+			firstPos, added, started, err := vctx.PlayYouTube(url)
+			if err != nil {
 				return ctx.Reply("play error: " + err.Error())
 			}
-			return ctx.Reply("now streaming: " + url)
+			tracks := vctx.Queue()
+			firstLabel := url
+			if firstPos < len(tracks) {
+				firstLabel = tracks[firstPos].Label()
+			}
+			switch {
+			case added > 1 && started:
+				return ctx.Reply(fmt.Sprintf("queued %d tracks, now streaming: %s", added, firstLabel))
+			case added > 1:
+				return ctx.Reply(fmt.Sprintf("queued %d tracks starting at #%d: %s", added, firstPos+1, firstLabel))
+			case started:
+				return ctx.Reply("now streaming: " + firstLabel)
+			default:
+				return ctx.Reply(fmt.Sprintf("queued at #%d: %s", firstPos+1, firstLabel))
+			}
+		})
+
+	bot.OnPrefix("skip", "Skip to the next track or jump to a queue position").
+		Aliases("next", "n").
+		StringArg("position", "1-based queue position to jump to (optional)", false).
+		RequireSameVoice().
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
+			if vctx == nil {
+				return ctx.Reply("not in a voice channel")
+			}
+			if pos := strings.TrimSpace(ctx.String("position")); pos != "" {
+				n, err := strconv.Atoi(pos)
+				if err != nil || n < 1 {
+					return ctx.Reply("position must be a positive number")
+				}
+				t, err := vctx.JumpTo(n - 1)
+				if err != nil {
+					return ctx.Reply(err.Error())
+				}
+				return ctx.Reply(fmt.Sprintf("jumped to #%d: %s", n, t.Label()))
+			}
+			t, ok, err := vctx.Skip()
+			if err != nil {
+				return ctx.Reply("skip error: " + err.Error())
+			}
+			if !ok {
+				return ctx.Reply("queue exhausted")
+			}
+			return ctx.Reply("skipped to: " + t.Label())
+		})
+
+	bot.OnPrefix("prev", "Replay the previous track or jump back to a position").
+		Aliases("previous", "back").
+		StringArg("position", "1-based queue position to jump to (optional)", false).
+		RequireSameVoice().
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
+			if vctx == nil {
+				return ctx.Reply("not in a voice channel")
+			}
+			if pos := strings.TrimSpace(ctx.String("position")); pos != "" {
+				n, err := strconv.Atoi(pos)
+				if err != nil || n < 1 {
+					return ctx.Reply("position must be a positive number")
+				}
+				t, err := vctx.JumpTo(n - 1)
+				if err != nil {
+					return ctx.Reply(err.Error())
+				}
+				return ctx.Reply(fmt.Sprintf("jumped to #%d: %s", n, t.Label()))
+			}
+			t, err := vctx.Prev()
+			if err != nil {
+				return ctx.Reply(err.Error())
+			}
+			return ctx.Reply("rewound to: " + t.Label())
+		})
+
+	bot.OnPrefix("queue", "Show the current queue").
+		Aliases("q", "list").
+		StringArg("page", "1-based page number (10 tracks per page)", false).
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
+			if vctx == nil {
+				return ctx.Reply("not in a voice channel")
+			}
+			tracks := vctx.Queue()
+			if len(tracks) == 0 {
+				return ctx.Reply("queue is empty")
+			}
+			cursor := vctx.Cursor()
+
+			const perPage = 10
+			pages := (len(tracks) + perPage - 1) / perPage
+
+			page := 1
+			if cursor >= 0 {
+				page = cursor/perPage + 1
+			}
+			if raw := strings.TrimSpace(ctx.String("page")); raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil || n < 1 || n > pages {
+					return ctx.Reply(fmt.Sprintf("page must be between 1 and %d", pages))
+				}
+				page = n
+			}
+
+			start := (page - 1) * perPage
+			end := min(start+perPage, len(tracks))
+
+			var body strings.Builder
+			for i := start; i < end; i++ {
+				marker := "  "
+				if i == cursor {
+					marker = "▶ "
+				}
+				fmt.Fprintf(&body, "%s`%d.` %s\n", marker, i+1, sikasa.Truncate(tracks[i].Label(), 100))
+			}
+
+			embed := ctx.NewEmbed().
+				Title("Queue").
+				Color(0x5865F2).
+				Description(sikasa.Truncate(body.String(), sikasa.EmbedDescriptionMaxLen)).
+				Footer(fmt.Sprintf("Page %d of %d • %d tracks total", page, pages, len(tracks)), "")
+			if now, ok := vctx.Now(); ok {
+				embed.Field("Now Playing", sikasa.Truncate(now.Label(), sikasa.EmbedFieldValueMaxLen), false)
+			}
+			return ctx.SendEmbed(embed)
+		})
+
+	bot.OnPrefix("nowplaying", "Show the current track").
+		Aliases("np", "now").
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
+			if vctx == nil {
+				return ctx.Reply("not in a voice channel")
+			}
+			t, ok := vctx.Now()
+			if !ok {
+				return ctx.Reply("nothing playing")
+			}
+			embed := ctx.NewEmbed().
+				Title("Now Playing").
+				Color(0x57F287).
+				Description(sikasa.Truncate(t.Label(), sikasa.EmbedDescriptionMaxLen))
+			if t.Author != "" {
+				embed.Field("Artist", t.Author, true)
+			}
+			if pos := vctx.Cursor(); pos >= 0 {
+				embed.Field("Position", fmt.Sprintf("#%d of %d", pos+1, len(vctx.Queue())), true)
+			}
+			return ctx.SendEmbed(embed)
+		})
+
+	bot.OnPrefix("clearqueue", "Clear the queue (keeps the current track)").
+		Aliases("cq").
+		RequireSameVoice().
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
+			if vctx == nil {
+				return ctx.Reply("not in a voice channel")
+			}
+			vctx.ClearQueue()
+			return ctx.Reply("queue cleared")
+		})
+
+	bot.OnPrefix("stop", "Stop playback (queue is preserved)").
+		RequireSameVoice().
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
+			if vctx == nil {
+				return ctx.Reply("not in a voice channel")
+			}
+			_ = vctx.Stop()
+			return ctx.Reply("stopped")
 		})
 
 	bot.OnPrefix("pause", "Pauses the current audio").
+		RequireSameVoice().
 		Handle(func(ctx *sikasa.PrefixCtx) error {
 			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
 			if vctx == nil {
@@ -149,6 +327,7 @@ func main() {
 		})
 
 	bot.OnPrefix("resume", "Resumes the paused audio").
+		RequireSameVoice().
 		Handle(func(ctx *sikasa.PrefixCtx) error {
 			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
 			if vctx == nil {
@@ -160,14 +339,18 @@ func main() {
 			return ctx.Reply("resumed")
 		})
 
-	bot.OnPrefix("stop", "Stops playback and leaves the voice channel").
+	bot.OnPrefix("leave", "Stops playback and leaves the voice channel").
+		RequireSameVoice().
 		Handle(func(ctx *sikasa.PrefixCtx) error {
 			vctx := ctx.Bot().Voice().Get(ctx.GuildID())
 			if vctx == nil {
 				return ctx.Reply("not in a voice channel")
 			}
-			_ = vctx.Leave()
-			return ctx.Reply("disconnected")
+			err = vctx.Leave()
+			if err != nil {
+				return ctx.Reply("leave error: " + err.Error())
+			}
+			return ctx.ReplyFile(" ", "media/akupergi.jpg")
 		})
 
 	if err := bot.Start(); err != nil {
@@ -179,32 +362,6 @@ func main() {
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
-}
-
-/*
-joinAuthorVoice locates the voice channel the command invoker is currently in
-and joins it (or moves to it if already connected elsewhere in the guild).
-
-	params:
-	      ctx: the slash command context
-	returns:
-	      *sikasa.VoiceCtx: live voice handle ready for playback
-	      error:            if the user is not in a voice channel
-*/
-func joinAuthorVoice(ctx *sikasa.CmdCtx) (*sikasa.VoiceCtx, error) {
-	guildID := ctx.GuildID()
-	if guildID == "" {
-		return nil, errors.New("voice commands only work in a server")
-	}
-	gid := ctx.Event().GuildID()
-	if gid == nil {
-		return nil, errors.New("voice commands only work in a server")
-	}
-	state, ok := ctx.Bot().Disgo().Caches.VoiceState(*gid, ctx.Author().ID)
-	if !ok || state.ChannelID == nil {
-		return nil, errors.New("you must be in a voice channel first")
-	}
-	return ctx.Bot().Voice().Join(guildID, state.ChannelID.String())
 }
 
 /*
@@ -230,7 +387,14 @@ func joinAuthorVoicePrefix(ctx *sikasa.PrefixCtx) (*sikasa.VoiceCtx, error) {
 	if !ok || state.ChannelID == nil {
 		return nil, errors.New("you must be in a voice channel first")
 	}
-	return ctx.Bot().Voice().Join(guildID, state.ChannelID.String())
+	vctx, err := ctx.Bot().Voice().Join(guildID, state.ChannelID.String())
+	if err != nil {
+		return nil, err
+	}
+	// Route auto-advance announcements ("next track: ...", "no more tracks")
+	// back to the text channel that requested playback.
+	vctx.SetAnnounceChannel(ctx.ChannelID())
+	return vctx, nil
 }
 
 var constants = map[string]float64{

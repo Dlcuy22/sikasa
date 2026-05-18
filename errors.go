@@ -54,4 +54,16 @@ var (
 	// ErrInvalidArg signals that a supplied argument failed type parsing
 	// (e.g. IntArg given non-numeric text).
 	ErrInvalidArg = errors.New("sikasa: invalid argument value")
+
+	// ErrQueueEmpty is returned when a queue navigation method (Next, Prev,
+	// Skip) has nothing more to advance to.
+	ErrQueueEmpty = errors.New("sikasa: queue is empty")
+
+	// ErrNoPrevious is returned by Prev() when the queue cursor is already
+	// at the first track.
+	ErrNoPrevious = errors.New("sikasa: no previous track")
+
+	// ErrNotSameChannel is returned by guards that require the invoking user
+	// to be in the same voice channel as the bot.
+	ErrNotSameChannel = errors.New("sikasa: you must be in the same voice channel as the bot")
 )

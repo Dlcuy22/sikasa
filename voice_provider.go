@@ -31,18 +31,23 @@ import (
 //   - paused: when true, ProvideOpusFrame returns silence
 //   - done:   when true, ProvideOpusFrame returns io.EOF (streaming finished)
 //   - closed: when true, the FFmpeg subprocess has already been killed/reaped
+//   - onDone: optional callback fired exactly once on natural EOF; suppressed
+//             when Close() is what ended the stream (so swap-driven teardowns
+//             do not chain into Next)
 //
 // Note: done and closed are separate. Natural EOF sets done=true so the audio
 // sender stops pulling frames, and also triggers cleanup so FFmpeg does not
 // linger. Without separating these, Close() short-circuits on the second call
-// and FFmpeg is never reaped — visible as multiple ffmpeg processes after
+// and FFmpeg is never reaped, visible as multiple ffmpeg processes after
 // playing several tracks back to back.
 type streamProvider struct {
-	parser *oggPageParser
-	proc   *ffmpegProcess
-	paused atomic.Bool
-	done   atomic.Bool
-	closed atomic.Bool
+	parser  *oggPageParser
+	proc    *ffmpegProcess
+	paused  atomic.Bool
+	done    atomic.Bool
+	closed  atomic.Bool
+	natural atomic.Bool
+	onDone  func()
 }
 
 // newStreamProvider wraps an ffmpegProcess in a streamProvider, ready to be
@@ -71,16 +76,28 @@ func (p *streamProvider) ProvideOpusFrame() ([]byte, error) {
 	}
 	frame, err := p.parser.NextFrame()
 	if errors.Is(err, io.EOF) {
-		p.done.Store(true)
-		p.cleanup()
+		p.finishNatural()
 		return nil, io.EOF
 	}
 	if err != nil {
-		p.done.Store(true)
-		p.cleanup()
+		p.finishNatural()
 		return nil, err
 	}
 	return frame, nil
+}
+
+// finishNatural marks the stream as finished due to upstream EOF or read
+// error and fires onDone exactly once. Used by ProvideOpusFrame so the
+// callback is only triggered for natural completion, not explicit Close.
+func (p *streamProvider) finishNatural() {
+	if !p.natural.CompareAndSwap(false, true) {
+		return
+	}
+	p.done.Store(true)
+	p.cleanup()
+	if p.onDone != nil {
+		go p.onDone()
+	}
 }
 
 /*

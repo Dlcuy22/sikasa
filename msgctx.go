@@ -121,18 +121,71 @@ func (c *MsgCtx) Send(text string) error {
 }
 
 /*
-ReplyEmbed sends an embed as an inline reply.
+ReplyEmbed sends an embed as an inline reply. Accepts either a built
+discord.Embed or a sikasa *EmbedBuilder; pass the builder directly without
+calling .Build() yourself.
 
 	params:
-	      embed: a fully-built Embed
+	      embed: a discord.Embed or *EmbedBuilder
 	returns:
-	      error: from disgo
+	      error: from disgo, or an error if the embed type is unsupported
 */
-func (c *MsgCtx) ReplyEmbed(embed discord.Embed) error {
-	_, err := c.bot.client.Rest.CreateMessage(c.event.ChannelID, discord.NewMessageCreate().
-		AddEmbeds(embed).
+func (c *MsgCtx) ReplyEmbed(embed any) error {
+	e, err := toEmbed(embed)
+	if err != nil {
+		return err
+	}
+	_, err = c.bot.client.Rest.CreateMessage(c.event.ChannelID, discord.NewMessageCreate().
+		AddEmbeds(e).
 		WithMessageReference(c.reference()))
 	return err
+}
+
+/*
+SendEmbed posts an embed to the same channel without referencing the user's
+message. Use it for informational announcements (queue listing, status
+panels) where an inline reply marker would be visual noise. Accepts either
+a discord.Embed or a *EmbedBuilder.
+
+	params:
+	      embed: a discord.Embed or *EmbedBuilder
+	returns:
+	      error: from disgo, or an error if the embed type is unsupported
+*/
+func (c *MsgCtx) SendEmbed(embed any) error {
+	e, err := toEmbed(embed)
+	if err != nil {
+		return err
+	}
+	_, err = c.bot.client.Rest.CreateMessage(c.event.ChannelID, discord.NewMessageCreate().
+		AddEmbeds(e))
+	return err
+}
+
+/*
+NewEmbed returns a fluent EmbedBuilder. Chain its setters and pass the
+result to ReplyEmbed / SendEmbed; you do not need to call .Build().
+
+	returns:
+	      *EmbedBuilder: ready for .Title()/.Description()/.Field()/...
+*/
+func (c *MsgCtx) NewEmbed() *EmbedBuilder { return NewEmbed() }
+
+// toEmbed normalizes whatever the caller passed (raw struct or *EmbedBuilder)
+// into a discord.Embed. Centralizing the type switch keeps the public
+// signatures forgiving without forcing every caller to remember .Build().
+func toEmbed(v any) (discord.Embed, error) {
+	switch x := v.(type) {
+	case discord.Embed:
+		return x, nil
+	case *EmbedBuilder:
+		if x == nil {
+			return discord.Embed{}, fmt.Errorf("sikasa: nil EmbedBuilder")
+		}
+		return x.Build(), nil
+	default:
+		return discord.Embed{}, fmt.Errorf("sikasa: unsupported embed type %T", v)
+	}
 }
 
 /*

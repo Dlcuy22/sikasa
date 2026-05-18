@@ -24,28 +24,38 @@ import (
 // ffmpegProcess holds a running FFmpeg invocation and its stdout reader.
 //
 // Key Fields:
-//   - cmd:    the os/exec command, kept for Kill() and Wait()
-//   - stdout: Ogg-Opus byte stream that the parser consumes
+//   - cmd:      the os/exec command, kept for Kill() and Wait()
+//   - stdout:   Ogg-Opus byte stream that the parser consumes
+//   - upstream: optional process feeding ffmpeg's stdin (e.g. yt-dlp). Tracked
+//               so Kill() can tear it down explicitly; SIGPIPE alone is not
+//               enough when the upstream is blocked on a network read
 type ffmpegProcess struct {
-	cmd    *exec.Cmd
-	stdout io.ReadCloser
+	cmd      *exec.Cmd
+	stdout   io.ReadCloser
+	upstream *exec.Cmd
 }
 
 // Stdout returns the Ogg-Opus byte stream produced by FFmpeg.
 func (p *ffmpegProcess) Stdout() io.ReadCloser { return p.stdout }
 
-// Kill terminates the FFmpeg process and closes its stdout. Safe to call
-// multiple times; subsequent calls are no-ops.
+// Kill terminates the FFmpeg process and any upstream feeder (yt-dlp), then
+// closes stdout. Safe to call multiple times; subsequent calls are no-ops.
 func (p *ffmpegProcess) Kill() {
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
+	if p.upstream != nil && p.upstream.Process != nil {
+		_ = p.upstream.Process.Kill()
+	}
 	if p.stdout != nil {
 		_ = p.stdout.Close()
 	}
+	// Reap to prevent zombies. Wait calls are safe even after Kill.
 	if p.cmd != nil {
-		// Reap to prevent zombies.
 		_ = p.cmd.Wait()
+	}
+	if p.upstream != nil {
+		_ = p.upstream.Wait()
 	}
 }
 

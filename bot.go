@@ -265,9 +265,17 @@ func (b *Bot) Start() error {
 		bot.WithEventListeners(b.router),
 		bot.WithEventListenerFunc(b.dispatchMessage),
 	}
-	if b.slog != nil {
-		opts = append(opts, bot.WithLogger(b.slog))
+	// Wrap the user's slog handler (or a discard handler if none was set) so
+	// we can sniff for "no active epoch" errors and auto-reconnect the
+	// affected VoiceCtx. The wrapper is transparent for everything else.
+	inner := b.slog
+	if inner == nil {
+		inner = slog.New(slog.NewTextHandler(discardWriter{}, &slog.HandlerOptions{
+			Level: slog.LevelError,
+		}))
 	}
+	wrapped := slog.New(newRecoveryHandler(inner.Handler(), b))
+	opts = append(opts, bot.WithLogger(wrapped))
 
 	client, err := disgo.New(b.token, opts...)
 	if err != nil {
