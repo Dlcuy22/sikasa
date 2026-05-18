@@ -65,6 +65,11 @@ const (
 //   - guildID:  optional dev-guild for instant command sync; zero means global
 //   - cmds:     registered command builders, flushed to Discord on Start()
 //   - kws:      registered keyword matchers, evaluated on every MessageCreate
+//   - prefix:   global text prefix that triggers PrefixBuilder dispatch;
+//               empty string disables prefix routing entirely
+//   - prefixes: registered prefix command builders
+//   - prefixIndex: lookup table built at Start(); keys include both names
+//                  and aliases (lower-cased)
 //   - client:   the live disgo client; nil until Start() succeeds
 //   - voices:   per-guild voice contexts, keyed by guild ID
 //   - slog:     structured logger handed to disgo (gateway, voice, REST)
@@ -79,6 +84,10 @@ type Bot struct {
 	kws     []*KeywordBuilder
 	logger  *log.Logger
 	slog    *slog.Logger
+
+	prefix      string
+	prefixes    []*PrefixBuilder
+	prefixIndex map[string]*PrefixBuilder
 
 	client *bot.Client
 	router *handler.Mux
@@ -99,7 +108,7 @@ disgo internally, so pass the raw token from the Developer Portal.
 */
 func New(token string) (*Bot, error) {
 	if token == "" {
-		return nil, fmt.Errorf("sikasa: empty token")
+		return nil, ErrEmptyToken
 	}
 	return &Bot{
 		token:   token,
@@ -234,6 +243,7 @@ func (b *Bot) Start() error {
 		}
 		c.register(b)
 	}
+	b.indexPrefixes()
 
 	opts := []bot.ConfigOpt{
 		bot.WithGatewayConfigOpts(
@@ -253,7 +263,7 @@ func (b *Bot) Start() error {
 			bot.WithAsyncEventsEnabled(),
 		),
 		bot.WithEventListeners(b.router),
-		bot.WithEventListenerFunc(b.dispatchKeywords),
+		bot.WithEventListenerFunc(b.dispatchMessage),
 	}
 	if b.slog != nil {
 		opts = append(opts, bot.WithLogger(b.slog))
@@ -325,13 +335,19 @@ func (b *Bot) syncCommands() error {
 	return nil
 }
 
-// dispatchKeywords runs every registered keyword rule against an inbound
-// message. Self-messages and bot messages are filtered to prevent loops.
-func (b *Bot) dispatchKeywords(e *events.MessageCreate) {
+// dispatchMessage routes inbound MessageCreate events. Self-messages and bot
+// messages are filtered first; then prefix dispatch claims the message if
+// applicable, otherwise keyword matchers run. The two paths are mutually
+// exclusive so a single user message cannot trigger both a prefix command and
+// an overlapping keyword reply.
+func (b *Bot) dispatchMessage(e *events.MessageCreate) {
 	if e.Message.Author.Bot {
 		return
 	}
 	if b.client != nil && e.Message.Author.ID == b.client.ID() {
+		return
+	}
+	if b.dispatchPrefix(e) {
 		return
 	}
 	ctx := newMsgCtx(b, e)

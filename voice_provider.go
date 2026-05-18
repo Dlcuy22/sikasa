@@ -27,14 +27,22 @@ import (
 //
 // Key Fields:
 //   - parser: pulls 20ms Opus frames from FFmpeg's stdout
-//   - proc:   the FFmpeg subprocess; killed in Close()
+//   - proc:   the FFmpeg subprocess; reaped in cleanup()
 //   - paused: when true, ProvideOpusFrame returns silence
-//   - done:   when true, ProvideOpusFrame returns io.EOF
+//   - done:   when true, ProvideOpusFrame returns io.EOF (streaming finished)
+//   - closed: when true, the FFmpeg subprocess has already been killed/reaped
+//
+// Note: done and closed are separate. Natural EOF sets done=true so the audio
+// sender stops pulling frames, and also triggers cleanup so FFmpeg does not
+// linger. Without separating these, Close() short-circuits on the second call
+// and FFmpeg is never reaped — visible as multiple ffmpeg processes after
+// playing several tracks back to back.
 type streamProvider struct {
 	parser *oggPageParser
 	proc   *ffmpegProcess
 	paused atomic.Bool
 	done   atomic.Bool
+	closed atomic.Bool
 }
 
 // newStreamProvider wraps an ffmpegProcess in a streamProvider, ready to be
@@ -64,10 +72,12 @@ func (p *streamProvider) ProvideOpusFrame() ([]byte, error) {
 	frame, err := p.parser.NextFrame()
 	if errors.Is(err, io.EOF) {
 		p.done.Store(true)
+		p.cleanup()
 		return nil, io.EOF
 	}
 	if err != nil {
 		p.done.Store(true)
+		p.cleanup()
 		return nil, err
 	}
 	return frame, nil
@@ -78,7 +88,15 @@ Close marks the provider as done and tears down the FFmpeg subprocess. Safe
 to call more than once; subsequent calls are no-ops.
 */
 func (p *streamProvider) Close() {
-	if !p.done.CompareAndSwap(false, true) {
+	p.done.Store(true)
+	p.cleanup()
+}
+
+// cleanup kills and reaps the FFmpeg subprocess exactly once. Called on both
+// natural EOF (so processes do not linger after a track finishes) and explicit
+// Close (Stop, swapProvider, Leave).
+func (p *streamProvider) cleanup() {
+	if !p.closed.CompareAndSwap(false, true) {
 		return
 	}
 	if p.proc != nil {

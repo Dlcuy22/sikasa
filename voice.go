@@ -20,7 +20,6 @@ package sikasa
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -64,15 +63,15 @@ one.
 */
 func (m *VoiceManager) Join(guildID, channelID string) (*VoiceCtx, error) {
 	if m.bot.client == nil {
-		return nil, errors.New("sikasa: bot not started yet")
+		return nil, ErrBotNotStarted
 	}
 	gid, err := snowflake.Parse(guildID)
 	if err != nil {
-		return nil, fmt.Errorf("sikasa: invalid guild id %q: %w", guildID, err)
+		return nil, fmt.Errorf("%w: %q: %v", ErrInvalidGuildID, guildID, err)
 	}
 	cid, err := snowflake.Parse(channelID)
 	if err != nil {
-		return nil, fmt.Errorf("sikasa: invalid channel id %q: %w", channelID, err)
+		return nil, fmt.Errorf("%w: %q: %v", ErrInvalidChannelID, channelID, err)
 	}
 
 	log := m.bot.vlog().With("guild_id", gid.String(), "channel_id", cid.String())
@@ -249,7 +248,7 @@ func (v *VoiceCtx) Pause() error {
 	p := v.provider
 	v.mu.Unlock()
 	if p == nil || p.IsDone() {
-		return errors.New("sikasa: no audio playing")
+		return ErrNoAudio
 	}
 	p.SetPaused(true)
 	v.state.Store(int32(StatePaused))
@@ -267,7 +266,7 @@ func (v *VoiceCtx) Resume() error {
 	p := v.provider
 	v.mu.Unlock()
 	if p == nil || !p.IsPaused() {
-		return errors.New("sikasa: not paused")
+		return ErrNotPaused
 	}
 	p.SetPaused(false)
 	v.state.Store(int32(StatePlaying))

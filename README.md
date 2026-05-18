@@ -18,10 +18,12 @@ Sikasa solves this by providing a **Builder pattern**, context helpers (`CmdCtx`
 
 - **Fluent Command Builder**: Define slash commands, their arguments, and their handler in one place.
 - **Auto-Sync**: Atomically bulk-overwrites slash commands on startup via `handler.SyncCommands`.
+- **Prefix Commands**: Classic text-prefix routing (`!play`, `!ping`) with the same builder feel as slash commands.
 - **Keyword & Regex Router**: Easily respond to specific words or regex patterns in messages.
 - **Context Helpers**: One-liners for replying with text, embeds, local files, or fetching files from URLs.
 - **Voice / Music with DAVE**: Join voice channels and stream local files or YouTube URLs with a single call. End-to-end encryption is wired in for you.
 - **Rate Limiting**: Optional sliding-window rate limit on keyword replies.
+- **Sentinel Errors**: Exported `Err*` values so callers can branch on `errors.Is(err, sikasa.ErrXxx)`.
 - **Escape Hatches**: Drop down to disgo via `.Disgo()`, `.Event()`, or `.Data()` if Sikasa doesn't cover your specific need.
 
 ## Requirements
@@ -149,6 +151,56 @@ bot.OnRegex(`(?i)^ping\s+\d+$`).
 - `ctx.Send("text")` (Sends a normal message to the channel)
 - `ctx.ReplyFile()`, `ctx.ReplyURL()`, `ctx.React("👍")`
 
+### Prefix Commands (`PrefixCtx`)
+
+For classic text-trigger commands (`!play`, `!ping`, `?help`), set a global prefix and register builders. The API mirrors `bot.Command`, so the muscle memory carries over.
+
+```go
+bot.SetPrefix("!")
+
+bot.OnPrefix("ping", "Replies pong").
+    Handle(func(ctx *sikasa.PrefixCtx) error {
+        return ctx.Reply("pong")
+    })
+
+bot.OnPrefix("echo", "Echoes back text").
+    Aliases("e", "say").
+    StringArg("text", "text to echo", true).
+    Handle(func(ctx *sikasa.PrefixCtx) error {
+        return ctx.Reply(ctx.String("text"))
+    })
+
+bot.OnPrefix("add", "Adds two integers").
+    IntArg("a", "first number", true).
+    IntArg("b", "second number", true).
+    Handle(func(ctx *sikasa.PrefixCtx) error {
+        sum := ctx.Int("a") + ctx.Int("b")
+        return ctx.Reply(strconv.FormatInt(sum, 10))
+    })
+```
+
+**Behavior:**
+- The last `StringArg` consumes the entire remaining message tail, so `!echo hello world` puts `"hello world"` into the `text` arg.
+- Aliases dispatch to the same handler. `!e` and `!say` both run the `echo` builder.
+- Command name lookup is case-insensitive (`!Echo` works); the prefix itself is case-sensitive.
+- When a message starts with the prefix, **keyword matchers do not fire** for that message, preventing double-responses.
+- Unknown commands reply with `sikasa: unknown prefix command: !xxx`. Missing required args reply with `sikasa: missing required argument: name`.
+
+**Hybrid Argument Access:**
+
+Builder validation gives you typed access via `ctx.String/Int/Bool`. For free-form parsing (variadic args, custom syntax) drop to the raw escape hatches:
+
+```go
+bot.OnPrefix("tag", "Tag multiple users").
+    Handle(func(ctx *sikasa.PrefixCtx) error {
+        // ctx.Args() — every whitespace-separated token after the command name
+        // ctx.Arg(i) — i-th token, or ""
+        // ctx.Rest() — message tail with original whitespace preserved
+        // ctx.Name() — canonical command name (alias-resolved)
+        return ctx.Reply("tagged: " + strings.Join(ctx.Args(), ", "))
+    })
+```
+
 ### Voice & Music (`VoiceCtx`)
 
 Join a voice channel and stream audio in a few lines. DAVE encryption is set up automatically.
@@ -205,6 +257,30 @@ bot.OnKeyword("sikasa").
         sikasa.RateLimitInterval(1, 10*time.Second))
 ```
 A given user can trigger this rule at most once per 10 seconds; extra messages are silently dropped.
+
+## Errors
+
+Sikasa exports sentinel errors so you can branch on failure modes without parsing strings. Wrapped errors (with extra context like the offending guild ID) preserve the chain, so `errors.Is` works on both bare and wrapped values.
+
+```go
+_, err := bot.Voice().Join("garbage", "ids")
+if errors.Is(err, sikasa.ErrInvalidGuildID) {
+    // safe to recover or show a friendlier message
+}
+```
+
+| Sentinel | Source |
+|---|---|
+| `ErrEmptyToken` | `sikasa.New("")` |
+| `ErrBotNotStarted` | Voice operations called before `bot.Start()` |
+| `ErrInvalidGuildID` | Guild snowflake fails to parse |
+| `ErrInvalidChannelID` | Channel snowflake fails to parse |
+| `ErrNotInVoice` | Voice operation requires an active connection |
+| `ErrNoAudio` | `Pause()` called while nothing is playing |
+| `ErrNotPaused` | `Resume()` called outside the paused state |
+| `ErrUnknownCommand` | Prefix dispatch finds no matching command |
+| `ErrMissingArg` | Required builder argument absent from the message |
+| `ErrInvalidArg` | Argument value fails type parsing (e.g. `IntArg` got non-numeric) |
 
 ## Escape Hatches
 
