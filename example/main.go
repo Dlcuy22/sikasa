@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/dlcuy22/sikasa"
 	"github.com/joho/godotenv"
 )
@@ -127,35 +128,25 @@ func main() {
 			return ctx.Reply(fmt.Sprintf("queued at #%d: `%s`", pos+1, path))
 		})
 
-	bot.OnPrefix("yt", "Plays or queues a YouTube URL or playlist").
+	bot.OnPrefix("yt", "Plays or queues a YouTube URL, playlist, or search query").
 		Aliases("youtube").
-		StringArg("url", "YouTube URL", true).
+		IntArg("results", "number of search results to show (default 3, max 5)", false).
+		StringArg("query", "URL or search query", true).
 		Handle(func(ctx *sikasa.PrefixCtx) error {
-			vctx, err := joinAuthorVoicePrefix(ctx)
-			if err != nil {
-				return ctx.Reply(err.Error())
-			}
-			url := ctx.String("url")
-			firstPos, added, started, err := vctx.PlayYouTube(url)
-			if err != nil {
-				return ctx.Reply("play error: " + err.Error())
-			}
-			tracks := vctx.Queue()
-			firstLabel := url
-			if firstPos < len(tracks) {
-				firstLabel = tracks[firstPos].Label()
-			}
-			switch {
-			case added > 1 && started:
-				return ctx.Reply(fmt.Sprintf("queued %d tracks, now streaming: %s", added, firstLabel))
-			case added > 1:
-				return ctx.Reply(fmt.Sprintf("queued %d tracks starting at #%d: %s", added, firstPos+1, firstLabel))
-			case started:
-				return ctx.Reply("now streaming: " + firstLabel)
-			default:
-				return ctx.Reply(fmt.Sprintf("queued at #%d: %s", firstPos+1, firstLabel))
-			}
+			return runYouTubePrefix(ctx, sikasa.YTSearchModeEnqueue)
 		})
+
+	bot.OnPrefix("insert", "Insert a YouTube URL or search result right after the current track").
+		Aliases("ins", "playnext").
+		IntArg("results", "number of search results to show (default 3, max 5)", false).
+		StringArg("query", "URL or search query", true).
+		Handle(func(ctx *sikasa.PrefixCtx) error {
+			return runYouTubePrefix(ctx, sikasa.YTSearchModeInsertNext)
+		})
+
+	bot.OnButton("/sikasa/ytsearch/{session}/{idx}", func(ctx *sikasa.ButtonCtx) error {
+		return handleYTSearchClick(ctx)
+	})
 
 	bot.OnPrefix("skip", "Skip to the next track or jump to a queue position").
 		Aliases("next", "n").
@@ -431,4 +422,190 @@ func parseNumber(s string) (float64, error) {
 	}
 
 	return strconv.ParseFloat(s, 64)
+}
+
+/*
+runYouTubePrefix is the shared body of k!yt and k!insert. It branches on
+whether the user passed a URL or a free-text query and on the requested
+mode (enqueue vs insert-next), so both prefix commands share one
+implementation.
+
+	params:
+	      ctx:  prefix command context
+	      mode: enqueue (k!yt) or insert-next (k!insert)
+	returns:
+	      error: from voice ops or yt-dlp
+*/
+func runYouTubePrefix(ctx *sikasa.PrefixCtx, mode sikasa.YTSearchMode) error {
+	vctx, err := joinAuthorVoicePrefix(ctx)
+	if err != nil {
+		return ctx.Reply(err.Error())
+	}
+	query := ctx.String("query")
+	if sikasa.IsHTTPURL(query) {
+		return playYouTubeURL(ctx, vctx, query, mode)
+	}
+	n := int(ctx.Int("results"))
+	if n <= 0 {
+		n = 3
+	}
+	if n > 5 {
+		n = 5
+	}
+	return showYouTubeSearch(ctx, query, n, mode)
+}
+
+/*
+playYouTubeURL routes a direct URL through PlayYouTube or InsertNextYouTube
+depending on mode and replies with the appropriate "queued"/"now streaming"/
+"inserted" line.
+
+	params:
+	      ctx:  prefix command context
+	      vctx: live VoiceCtx for the guild
+	      url:  YouTube URL to play
+	      mode: enqueue (append) or insert-next (after current)
+	returns:
+	      error: from the underlying voice op or Reply
+*/
+func playYouTubeURL(ctx *sikasa.PrefixCtx, vctx *sikasa.VoiceCtx, url string, mode sikasa.YTSearchMode) error {
+	var (
+		firstPos, added int
+		started         bool
+		err             error
+	)
+	switch mode {
+	case sikasa.YTSearchModeInsertNext:
+		firstPos, added, started, err = vctx.InsertNextYouTube(url)
+	default:
+		firstPos, added, started, err = vctx.PlayYouTube(url)
+	}
+	if err != nil {
+		return ctx.Reply("play error: " + err.Error())
+	}
+	tracks := vctx.Queue()
+	firstLabel := url
+	if firstPos < len(tracks) {
+		firstLabel = tracks[firstPos].Label()
+	}
+	switch {
+	case started:
+		return ctx.Reply("now streaming: " + firstLabel)
+	case mode == sikasa.YTSearchModeInsertNext && added > 1:
+		return ctx.Reply(fmt.Sprintf("inserted %d tracks starting at #%d: %s", added, firstPos+1, firstLabel))
+	case mode == sikasa.YTSearchModeInsertNext:
+		return ctx.Reply(fmt.Sprintf("inserted at #%d: %s", firstPos+1, firstLabel))
+	case added > 1:
+		return ctx.Reply(fmt.Sprintf("queued %d tracks starting at #%d: %s", added, firstPos+1, firstLabel))
+	default:
+		return ctx.Reply(fmt.Sprintf("queued at #%d: %s", firstPos+1, firstLabel))
+	}
+}
+
+/*
+showYouTubeSearch runs SearchYouTube, registers a session in the requested
+mode, and posts the picker embed plus a button row. The session ties this
+picker to the invoker so handleYTSearchClick can refuse strangers.
+
+	params:
+	      ctx:   prefix command context
+	      query: free-text search string
+	      n:     number of results to show
+	      mode:  enqueue or insert-next, propagated to the click handler
+	returns:
+	      error: from yt-dlp or from posting the embed
+*/
+func showYouTubeSearch(ctx *sikasa.PrefixCtx, query string, n int, mode sikasa.YTSearchMode) error {
+	results, err := sikasa.SearchYouTube(query, n)
+	if err != nil {
+		return ctx.Reply("search error: " + err.Error())
+	}
+	if len(results) == 0 {
+		return ctx.Reply("no results for: " + query)
+	}
+
+	guildID, err := snowflake.Parse(ctx.GuildID())
+	if err != nil {
+		return ctx.Reply("voice commands only work in a server")
+	}
+	sessionID := ctx.Bot().NewYTSearchSessionMode(ctx.Author().ID, guildID, results, mode)
+
+	embed, buttons := sikasa.BuildYTSearchEmbed(query, sessionID, results)
+	return ctx.SendEmbedWithButtons(embed, buttons...)
+}
+
+/*
+handleYTSearchClick processes a click on a search-result button. Validates
+that the clicker is the invoker, joins the user's voice channel if needed,
+and either enqueues or insert-nexts the chosen track based on the
+session's stored mode. Cancel buttons just clear the picker.
+
+	params:
+	      ctx: button interaction context
+	returns:
+	      error: from the underlying voice operations
+*/
+func handleYTSearchClick(ctx *sikasa.ButtonCtx) error {
+	sessionID := ctx.Var("session")
+	choice := ctx.Var("idx")
+
+	session := ctx.Bot().YTSearchSession(sessionID)
+	if session == nil {
+		return ctx.Reply("this picker has expired")
+	}
+	if ctx.Author().ID != session.InvokerID() {
+		return ctx.Reply("only the requester can pick a result")
+	}
+
+	if choice == "cancel" {
+		ctx.Bot().ConsumeYTSearch(sessionID)
+		return ctx.UpdateEmbed(sikasa.NewEmbed().
+			Title("Search cancelled").
+			Color(0x99AAB5))
+	}
+
+	idx, err := strconv.Atoi(choice)
+	if err != nil || idx < 0 || idx >= len(session.Tracks()) {
+		return ctx.Reply("invalid choice")
+	}
+	track := session.Tracks()[idx]
+
+	state, ok := ctx.Bot().Disgo().Caches.VoiceState(session.GuildID(), session.InvokerID())
+	if !ok || state.ChannelID == nil {
+		return ctx.Reply("you must be in a voice channel first")
+	}
+	vctx, err := ctx.Bot().Voice().Join(session.GuildID().String(), state.ChannelID.String())
+	if err != nil {
+		return ctx.Reply("join error: " + err.Error())
+	}
+	vctx.SetAnnounceChannel(ctx.ChannelID())
+
+	mode := session.Mode()
+	ctx.Bot().ConsumeYTSearch(sessionID)
+
+	var (
+		pos     int
+		started bool
+	)
+	switch mode {
+	case sikasa.YTSearchModeInsertNext:
+		pos, started, err = vctx.InsertNext(track)
+	default:
+		pos, _, started, err = vctx.PlayYouTube(track.Source)
+	}
+	if err != nil {
+		return ctx.Reply("play error: " + err.Error())
+	}
+
+	embed := sikasa.NewEmbed().
+		Color(0x57F287)
+	switch {
+	case started:
+		embed.Title("Now Playing").Description(track.Label())
+	case mode == sikasa.YTSearchModeInsertNext:
+		embed.Title(fmt.Sprintf("Inserted at #%d", pos+1)).Description(track.Label())
+	default:
+		embed.Title(fmt.Sprintf("Queued at #%d", pos+1)).Description(track.Label())
+	}
+	return ctx.UpdateEmbed(embed)
 }

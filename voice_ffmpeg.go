@@ -130,6 +130,34 @@ func spawnFromStdin(stdin io.Reader) (*ffmpegProcess, error) {
 	return run("ffmpeg", args, stdin)
 }
 
+/*
+spawnRemuxFromStdin starts FFmpeg in stream-copy mode for inputs that are
+already Opus (e.g. YouTube itag 251 in WebM). FFmpeg only repackages the
+audio into Ogg without touching the codec, which is ~99% cheaper than
+transcoding and preserves source quality.
+
+	params:
+	      stdin: source byte stream containing an Opus track
+	returns:
+	      *ffmpegProcess, error
+
+Note: We still go through FFmpeg here because YouTube serves Opus inside a
+WebM/Matroska container and Discord expects raw Opus pages. FFmpeg handles
+the container conversion at minimal cost. Use spawnFromStdin only when the
+upstream codec is unknown or non-Opus.
+*/
+func spawnRemuxFromStdin(stdin io.Reader) (*ffmpegProcess, error) {
+	args := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-i", "pipe:0",
+		"-vn",
+		"-c:a", "copy",
+		"-f", "ogg",
+		"pipe:1",
+	}
+	return run("ffmpeg", args, stdin)
+}
+
 // run is the shared spawn helper. It wires up stdout (always) and stdin
 // (when provided), starts the process, and returns the wrapper.
 func run(bin string, args []string, stdin io.Reader) (*ffmpegProcess, error) {

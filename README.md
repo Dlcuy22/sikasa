@@ -221,10 +221,10 @@ Builder validation gives you typed access via `ctx.String/Int/Bool`. For free-fo
 ```go
 bot.OnPrefix("tag", "Tag multiple users").
     Handle(func(ctx *sikasa.PrefixCtx) error {
-        // ctx.Args() — every whitespace-separated token after the command name
-        // ctx.Arg(i) — i-th token, or ""
-        // ctx.Rest() — message tail with original whitespace preserved
-        // ctx.Name() — canonical command name (alias-resolved)
+        // ctx.Args() every whitespace-separated token after the command name
+        // ctx.Arg(i) i-th token, or ""
+        // ctx.Rest() message tail with original whitespace preserved
+        // ctx.Name() canonical command name (alias-resolved)
         return ctx.Reply("tagged: " + strings.Join(ctx.Args(), ", "))
     })
 ```
@@ -264,6 +264,28 @@ vctx.PlayYouTube("https://youtu.be/dQw4w9WgXcQ")
 
 Playlists, channels, and any other multi-entry yt-dlp URL are expanded automatically. A single `PlayYouTube` call appends every entry to the queue in order, so passing `youtube.com/playlist?list=...` enqueues the whole list at once.
 
+Free-text search via `SearchYouTube(query, n)` returns top-N candidate Tracks (`ytsearch<n>:<query>` under the hood). Pair it with `BuildYTSearchEmbed` and `Bot.OnButton` to give users an interactive picker:
+
+```go
+// In your prefix handler:
+results, _ := sikasa.SearchYouTube(query, 3)
+sessionID := bot.NewYTSearchSession(invokerID, guildID, results)
+embed, buttons := sikasa.BuildYTSearchEmbed(query, sessionID, results)
+ctx.SendEmbedWithButtons(embed, buttons...)
+
+// Wire the click handler once at startup:
+bot.OnButton("/sikasa/ytsearch/{session}/{idx}", func(ctx *sikasa.ButtonCtx) error {
+    s := ctx.Bot().YTSearchSession(ctx.Var("session"))
+    if s == nil || ctx.Author().ID != s.InvokerID() {
+        return ctx.Reply("not allowed")
+    }
+    // s.Tracks()[idx], join voice, PlayYouTube, etc.
+    return nil
+})
+```
+
+Sessions live in memory for 5 minutes; only the original invoker can click results.
+
 ```go
 firstPos, added, started, err := vctx.PlayYouTube(playlistURL)
 // added = number of tracks appended (1 for a single video)
@@ -289,7 +311,7 @@ Queue control:
 ```go
 vctx.Skip()         // advance to the next track (alias: Next)
 vctx.Prev()         // rewind cursor by one and play that track
-vctx.Now()          // (Track, ok) — currently loaded track
+vctx.Now()          // (Track, ok) currently loaded track
 vctx.Queue()        // []Track snapshot of the entire list
 vctx.Cursor()       // index of the current track, -1 if none started
 vctx.ClearQueue()   // empty the queue (current track keeps playing)

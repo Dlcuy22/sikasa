@@ -89,6 +89,11 @@ type Bot struct {
 	prefixes    []*PrefixBuilder
 	prefixIndex map[string]*PrefixBuilder
 
+	buttonRoutes []buttonRoute
+
+	ytSearches   map[string]*ytSearchSession
+	ytSearchesMu sync.Mutex
+
 	client *bot.Client
 	router *handler.Mux
 
@@ -244,6 +249,7 @@ func (b *Bot) Start() error {
 		c.register(b)
 	}
 	b.indexPrefixes()
+	b.registerButtons()
 
 	opts := []bot.ConfigOpt{
 		bot.WithGatewayConfigOpts(

@@ -171,6 +171,31 @@ result to ReplyEmbed / SendEmbed; you do not need to call .Build().
 */
 func (c *MsgCtx) NewEmbed() *EmbedBuilder { return NewEmbed() }
 
+/*
+SendEmbedWithButtons posts an embed plus a single ActionRow of interactive
+components (typically buttons returned from BuildYTSearchEmbed or any
+custom picker). For multi-row component layouts, use Event() and build
+the message manually.
+
+	params:
+	      embed:      a discord.Embed or *EmbedBuilder
+	      components: interactive components (max 5 per Discord ActionRow)
+	returns:
+	      error: from disgo or an unsupported-embed-type error
+*/
+func (c *MsgCtx) SendEmbedWithButtons(embed any, components ...discord.InteractiveComponent) error {
+	e, err := toEmbed(embed)
+	if err != nil {
+		return err
+	}
+	msg := discord.NewMessageCreate().AddEmbeds(e)
+	if len(components) > 0 {
+		msg = msg.AddActionRow(components...)
+	}
+	_, err = c.bot.client.Rest.CreateMessage(c.event.ChannelID, msg)
+	return err
+}
+
 // toEmbed normalizes whatever the caller passed (raw struct or *EmbedBuilder)
 // into a discord.Embed. Centralizing the type switch keeps the public
 // signatures forgiving without forcing every caller to remember .Build().

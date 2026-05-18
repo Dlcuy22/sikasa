@@ -144,3 +144,56 @@ func (q *queue) HasNext() bool { return q.cursor+1 < len(q.tracks) }
 
 // HasPrev reports whether Rewind would succeed.
 func (q *queue) HasPrev() bool { return q.cursor > 0 }
+
+// InsertAfter inserts t at position after+1, shifting any subsequent tracks
+// one slot down. Returns the new index of the inserted track. When after is
+// out of range, the track is appended to the tail. The cursor itself is not
+// touched, even if it sits at or past the insertion point; advance/rewind
+// flow naturally to the new track on the next step.
+//
+//	params:
+//	      after: 0-based index to insert *after* (use Cursor() for "next up")
+//	      t:     track to insert
+//	returns:
+//	      int: 0-based index of the inserted track
+func (q *queue) InsertAfter(after int, t Track) int {
+	pos := after + 1
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(q.tracks) {
+		pos = len(q.tracks)
+	}
+	q.tracks = append(q.tracks, Track{})
+	copy(q.tracks[pos+1:], q.tracks[pos:])
+	q.tracks[pos] = t
+	return pos
+}
+
+// InsertBatchAfter inserts a batch of tracks starting after `after`, in
+// order. Returns the index of the first inserted track. When after is out
+// of range, the batch is appended.
+//
+//	params:
+//	      after:  0-based index to insert *after*
+//	      batch:  tracks to insert in order
+//	returns:
+//	      int: index of the first newly-inserted track
+func (q *queue) InsertBatchAfter(after int, batch []Track) int {
+	if len(batch) == 0 {
+		return after + 1
+	}
+	pos := after + 1
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(q.tracks) {
+		pos = len(q.tracks)
+	}
+	q.tracks = append(q.tracks, batch...)
+	copy(q.tracks[pos+len(batch):], q.tracks[pos:len(q.tracks)-len(batch)])
+	for i, t := range batch {
+		q.tracks[pos+i] = t
+	}
+	return pos
+}

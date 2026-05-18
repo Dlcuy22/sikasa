@@ -314,6 +314,72 @@ func (v *VoiceCtx) Enqueue(t Track) (position int, started bool, err error) {
 }
 
 /*
+InsertNext inserts a track immediately after the currently playing one,
+shifting any later tracks down by one. When nothing is playing yet, the
+track lands at index 0 and playback starts. Useful for "play next" UX
+without disturbing what is currently audible.
+
+	params:
+	      t: track to insert
+	returns:
+	      position: 0-based index of the newly inserted track
+	      started:  true if this call kicked off playback (queue was idle)
+	      error:    spawn error when started==true and the pipeline fails
+*/
+func (v *VoiceCtx) InsertNext(t Track) (position int, started bool, err error) {
+	v.mu.Lock()
+	idle := v.provider == nil || v.provider.IsDone()
+	cursor := v.queue.Cursor()
+	pos := v.queue.InsertAfter(cursor, t)
+	v.mu.Unlock()
+
+	if !idle {
+		return pos, false, nil
+	}
+	if err := v.advanceAndPlay(); err != nil {
+		return pos, false, err
+	}
+	return pos, true, nil
+}
+
+/*
+InsertNextYouTube probes a yt-dlp-resolvable URL (single video, playlist,
+channel) and inserts every resulting track immediately after the currently
+playing one in playlist order. Mirror of PlayYouTube's expand-then-enqueue
+flow but inserts instead of appending. Probe failure falls back to
+inserting the raw URL as a single track.
+
+	params:
+	      url: any URL yt-dlp can resolve
+	returns:
+	      firstPos: index of the first inserted track
+	      added:    number of tracks inserted (>=1)
+	      started:  true if the call kicked off playback (queue was idle)
+	      error:    spawn error when started==true and the pipeline fails
+*/
+func (v *VoiceCtx) InsertNextYouTube(url string) (firstPos, added int, started bool, err error) {
+	tracks, perr := probeYouTubeEntries(url)
+	if perr != nil || len(tracks) == 0 {
+		pos, started, err := v.InsertNext(Track{Kind: TrackYouTube, Source: url})
+		return pos, 1, started, err
+	}
+
+	v.mu.Lock()
+	idle := v.provider == nil || v.provider.IsDone()
+	cursor := v.queue.Cursor()
+	first := v.queue.InsertBatchAfter(cursor, tracks)
+	v.mu.Unlock()
+
+	if !idle {
+		return first, len(tracks), false, nil
+	}
+	if err := v.advanceAndPlay(); err != nil {
+		return first, len(tracks), false, err
+	}
+	return first, len(tracks), true, nil
+}
+
+/*
 Skip stops the current track and plays the next one in the queue. If the
 queue has no further tracks the connection stays open but playback ends.
 
