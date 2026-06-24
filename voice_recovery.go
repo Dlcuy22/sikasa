@@ -60,7 +60,21 @@ func (h *recoveryHandler) Enabled(ctx context.Context, lvl slog.Level) bool {
 }
 
 func (h *recoveryHandler) Handle(ctx context.Context, r slog.Record) error {
-	// Always pass the record through first so user-installed sinks see it.
+	if r.Level == slog.LevelDebug {
+		low := strings.ToLower(r.Message)
+		isVerbose := strings.Contains(low, "payload") ||
+			strings.Contains(low, "heartbeat") ||
+			strings.Contains(low, "websocket") ||
+			strings.Contains(low, "write") ||
+			strings.Contains(low, "read") ||
+			strings.Contains(low, "send") ||
+			strings.Contains(low, "recv") ||
+			strings.Contains(low, "receive")
+
+		if isVerbose {
+			r.Level = slog.LevelDebug - 4
+		}
+	}
 	err := h.inner.Handle(ctx, r)
 	if r.Level >= slog.LevelError {
 		h.maybeRecover(r)

@@ -22,10 +22,14 @@ package sikasa
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
+	"time"
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
@@ -99,6 +103,16 @@ type Bot struct {
 
 	voices   map[snowflake.ID]*VoiceCtx
 	voicesMu sync.Mutex
+
+	cacheDir         string
+	cacheMaxAhead    int
+	cacheEnabled     bool
+	cacheMu          sync.Mutex
+	cacheActive      map[string]context.CancelFunc
+	musicLogInterval time.Duration
+	prefetchNotify   chan struct{}
+	prefetchCtx      context.Context
+	prefetchCancel   context.CancelFunc
 }
 
 /*
@@ -115,11 +129,20 @@ func New(token string) (*Bot, error) {
 	if token == "" {
 		return nil, ErrEmptyToken
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Bot{
-		token:   token,
-		intents: gateway.IntentsNone,
-		logger:  log.Default(),
-		voices:  make(map[snowflake.ID]*VoiceCtx),
+		token:            token,
+		intents:          gateway.IntentsNone,
+		logger:           log.Default(),
+		voices:           make(map[snowflake.ID]*VoiceCtx),
+		cacheDir:         "sikasa-data/audiocache",
+		cacheMaxAhead:    3,
+		cacheEnabled:     true,
+		cacheActive:      make(map[string]context.CancelFunc),
+		musicLogInterval: 5 * time.Second,
+		prefetchNotify:   make(chan struct{}, 1),
+		prefetchCtx:      ctx,
+		prefetchCancel:   cancel,
 	}, nil
 }
 
@@ -193,18 +216,61 @@ func (b *Bot) WithSlog(l *slog.Logger) *Bot {
 }
 
 /*
-WithVerbose enables debug-level structured logging on stderr for both the
-sikasa wrapper and the underlying disgo client. Useful when diagnosing
-voice-region issues, slow interaction acks, or gateway zombies.
+WithVerbose enables structured logging on stderr for both the sikasa
+wrapper and the underlying disgo client. By default, it uses debug-level
+logging; this can be customized by passing a specific slog.Level.
 
-	returns:
-	      *Bot: receiver, for chaining
+    params:
+          levels: optional slog.Level to override the default LevelDebug
+    returns:
+          *Bot:   receiver, for chaining
 */
-func (b *Bot) WithVerbose() *Bot {
-	b.slog = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level:     slog.LevelDebug,
-		AddSource: true,
-	}))
+func (b *Bot) WithVerbose(levels ...slog.Level) *Bot {
+	lvl := slog.LevelDebug
+	if len(levels) > 0 {
+		lvl = levels[0]
+	}
+	b.slog = slog.New(NewColorHandler(os.Stderr, lvl))
+	return b
+}
+
+/*
+WithCache configures the sliding window audio prefetching cacher.
+
+    params:
+          dir:      cache directory path (e.g. "sikasa-data/audiocache")
+          maxAhead: number of tracks to prefetch ahead of the current track
+    returns:
+          *Bot:     receiver, for chaining
+*/
+func (b *Bot) WithCache(dir string, maxAhead int) *Bot {
+	b.cacheDir = dir
+	b.cacheMaxAhead = maxAhead
+	b.cacheEnabled = true
+	return b
+}
+
+/*
+WithoutCache disables the audio prefetching cacher entirely.
+
+    returns:
+          *Bot: receiver, for chaining
+*/
+func (b *Bot) WithoutCache() *Bot {
+	b.cacheEnabled = false
+	return b
+}
+
+/*
+WithMusicLogInterval tunes the logging interval for music process memory usage reports.
+
+    params:
+          d: reporting interval (e.g. 5s)
+    returns:
+          *Bot: receiver, for chaining
+*/
+func (b *Bot) WithMusicLogInterval(d time.Duration) *Bot {
+	b.musicLogInterval = d
 	return b
 }
 
@@ -299,8 +365,38 @@ func (b *Bot) Start() error {
 		return err
 	}
 
+	if b.cacheEnabled {
+		if b.prefetchCtx.Err() != nil {
+			b.prefetchCtx, b.prefetchCancel = context.WithCancel(context.Background())
+		}
+		go b.prefetchWorker()
+	}
+
 	b.logger.Printf("sikasa: bot online")
 	return nil
+}
+
+/*
+Shutdown cleans up all active connections, stops background workers, and exits the process immediately.
+This prevents the process from getting stuck on terminal interruption (Ctrl-C).
+*/
+func (b *Bot) Shutdown() {
+	b.logger.Printf("sikasa: shutting down...")
+
+	done := make(chan struct{})
+	go func() {
+		_ = b.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		b.logger.Printf("sikasa: shutdown complete")
+	case <-time.After(1 * time.Second):
+		b.logger.Printf("sikasa: shutdown timed out, force exiting")
+	}
+
+	os.Exit(0)
 }
 
 /*
@@ -311,6 +407,10 @@ after Start().
 	      error: reserved for future error paths; currently always nil
 */
 func (b *Bot) Stop() error {
+	if b.prefetchCancel != nil {
+		b.prefetchCancel()
+	}
+
 	b.voicesMu.Lock()
 	for _, vctx := range b.voices {
 		_ = vctx.Stop()
@@ -389,4 +489,144 @@ func (b *Bot) vlog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(discardWriter{}, &slog.HandlerOptions{
 		Level: slog.LevelError + 1, // effectively off
 	}))
+}
+
+// ColorHandler is a custom structured log handler that formats logs with ANSI colors.
+type ColorHandler struct {
+	writer io.Writer
+	level  slog.Level
+	mu     sync.Mutex
+	attrs  []slog.Attr
+	group  string
+}
+
+/*
+NewColorHandler constructs a ColorHandler that writes to w at the given level.
+
+    params:
+          w: the writer to write output to (e.g. os.Stderr)
+          lvl: the minimum logging level to display
+    returns:
+          *ColorHandler: initialized handler
+*/
+func NewColorHandler(w io.Writer, lvl slog.Level) *ColorHandler {
+	return &ColorHandler{
+		writer: w,
+		level:  lvl,
+	}
+}
+
+/*
+Enabled reports whether the handler handles records at the given level.
+
+    params:
+          ctx: execution context
+          lvl: log level to check
+    returns:
+          bool: true if the level is enabled
+*/
+func (h *ColorHandler) Enabled(ctx context.Context, lvl slog.Level) bool {
+	return lvl >= h.level
+}
+
+/*
+Handle processes the log record and prints it to the destination writer with ANSI colors.
+
+    params:
+          ctx: execution context
+          r:   the log record containing message, level, attributes, and source
+    returns:
+          error: any writer write error
+*/
+func (h *ColorHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// 1. Time (gray)
+	timeStr := r.Time.Format("2006-01-02 15:04:05.000")
+	_, _ = fmt.Fprintf(h.writer, "\x1b[90m%s\x1b[0m ", timeStr)
+
+	// 2. Level (colored)
+	var lvlStr string
+	switch {
+	case r.Level == slog.LevelDebug:
+		lvlStr = "\x1b[36mDEBUG\x1b[0m"
+	case r.Level == slog.LevelInfo:
+		lvlStr = "\x1b[32mINFO \x1b[0m"
+	case r.Level == slog.LevelWarn:
+		lvlStr = "\x1b[33mWARN \x1b[0m"
+	case r.Level == slog.LevelError:
+		lvlStr = "\x1b[31mERROR\x1b[0m"
+	case r.Level < slog.LevelDebug:
+		lvlStr = "\x1b[90mTRACE\x1b[0m"
+	default:
+		lvlStr = fmt.Sprintf("\x1b[90m%-5s\x1b[0m", r.Level.String())
+	}
+	_, _ = fmt.Fprintf(h.writer, "%s ", lvlStr)
+
+	// 3. Source (dim blue/gray)
+	if r.PC != 0 {
+		fs := runtime.CallersFrames([]uintptr{r.PC})
+		frame, _ := fs.Next()
+		if frame.File != "" {
+			file := filepath.Base(frame.File)
+			_, _ = fmt.Fprintf(h.writer, "\x1b[34m[%s:%d]\x1b[0m ", file, frame.Line)
+		}
+	}
+
+	// 4. Message
+	_, _ = fmt.Fprintf(h.writer, "%s", r.Message)
+
+	// 5. Pre-configured handler attributes
+	for _, a := range h.attrs {
+		_, _ = fmt.Fprintf(h.writer, " \x1b[90m%s=\x1b[0m\x1b[37m%v\x1b[0m", a.Key, a.Value.Any())
+	}
+
+	// 6. Record attributes
+	r.Attrs(func(a slog.Attr) bool {
+		_, _ = fmt.Fprintf(h.writer, " \x1b[90m%s=\x1b[0m\x1b[37m%v\x1b[0m", a.Key, a.Value.Any())
+		return true
+	})
+
+	_, _ = fmt.Fprintln(h.writer)
+	return nil
+}
+
+/*
+WithAttrs returns a new handler that contains the given attributes.
+
+    params:
+          attrs: additional log attributes
+    returns:
+          slog.Handler: new handler with attributes merged
+*/
+func (h *ColorHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	newH := &ColorHandler{
+		writer: h.writer,
+		level:  h.level,
+		attrs:  append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...),
+		group:  h.group,
+	}
+	return newH
+}
+
+/*
+WithGroup returns a new handler that scopes output to a given group.
+
+    params:
+          name: group name
+    returns:
+          slog.Handler: new handler with group set
+*/
+func (h *ColorHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	newH := &ColorHandler{
+		writer: h.writer,
+		level:  h.level,
+		attrs:  h.attrs,
+		group:  name,
+	}
+	return newH
 }

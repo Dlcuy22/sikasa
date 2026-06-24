@@ -14,6 +14,12 @@
 // locked.
 package sikasa
 
+import (
+	"math/rand"
+	"time"
+)
+
+
 // TrackKind tags how a Track should be played back.
 type TrackKind int
 
@@ -197,3 +203,20 @@ func (q *queue) InsertBatchAfter(after int, batch []Track) int {
 	}
 	return pos
 }
+
+/*
+Shuffle randomizes the order of all tracks in the queue after the current cursor.
+This leaves the currently playing track and historical tracks untouched.
+*/
+func (q *queue) Shuffle() {
+	if q.cursor+2 >= len(q.tracks) {
+		return
+	}
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	start := q.cursor + 1
+	n := len(q.tracks) - start
+	r.Shuffle(n, func(i, j int) {
+		q.tracks[start+i], q.tracks[start+j] = q.tracks[start+j], q.tracks[start+i]
+	})
+}
+

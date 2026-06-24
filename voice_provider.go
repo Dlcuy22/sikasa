@@ -17,8 +17,15 @@ package sikasa
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/disgoorg/disgo/voice"
 )
@@ -41,21 +48,28 @@ import (
 // and FFmpeg is never reaped, visible as multiple ffmpeg processes after
 // playing several tracks back to back.
 type streamProvider struct {
-	parser  *oggPageParser
-	proc    *ffmpegProcess
-	paused  atomic.Bool
-	done    atomic.Bool
-	closed  atomic.Bool
-	natural atomic.Bool
-	onDone  func()
+	parser      *oggPageParser
+	proc        *ffmpegProcess
+	paused      atomic.Bool
+	done        atomic.Bool
+	closed      atomic.Bool
+	natural     atomic.Bool
+	onDone      func()
+	logger      *slog.Logger
+	frameCount  uint64
+	logInterval time.Duration
+	lastLogTime time.Time
 }
 
 // newStreamProvider wraps an ffmpegProcess in a streamProvider, ready to be
 // passed to voice.Conn.SetOpusFrameProvider.
-func newStreamProvider(proc *ffmpegProcess) *streamProvider {
+func newStreamProvider(proc *ffmpegProcess, logger *slog.Logger, logInterval time.Duration) *streamProvider {
 	return &streamProvider{
-		proc:   proc,
-		parser: newOggParser(proc.Stdout()),
+		proc:        proc,
+		parser:      newOggParser(proc.Stdout()),
+		logger:      logger,
+		logInterval: logInterval,
+		lastLogTime: time.Now(),
 	}
 }
 
@@ -74,7 +88,34 @@ func (p *streamProvider) ProvideOpusFrame() ([]byte, error) {
 	if p.paused.Load() {
 		return voice.SilenceAudioFrame, nil
 	}
+
+	p.frameCount++
+
+	start := time.Now()
 	frame, err := p.parser.NextFrame()
+	elapsed := time.Since(start)
+
+	// An underrun happens when frame retrieval takes longer than the 20ms window.
+	if elapsed > 20*time.Millisecond && p.logger != nil {
+		totalMem := p.logSpawnedMemory()
+		p.logger.Warn("audio underrun detected",
+			"elapsed", elapsed.String(),
+			"frame", p.frameCount,
+			"process_memory_mb", float64(totalMem)/(1024*1024),
+		)
+	}
+
+	// Periodically log memory usage based on the configured log interval (default 5s).
+	if p.logInterval > 0 && time.Since(p.lastLogTime) >= p.logInterval && p.logger != nil {
+		totalMem := p.logSpawnedMemory()
+		p.logger.Debug("music process memory usage status",
+			"total_bytes", totalMem,
+			"total_mb", float64(totalMem)/(1024*1024),
+			"frame", p.frameCount,
+		)
+		p.lastLogTime = time.Now()
+	}
+
 	if errors.Is(err, io.EOF) {
 		p.finishNatural()
 		return nil, io.EOF
@@ -84,6 +125,40 @@ func (p *streamProvider) ProvideOpusFrame() ([]byte, error) {
 		return nil, err
 	}
 	return frame, nil
+}
+
+// logSpawnedMemory reads Linux RSS pages for spawned ffmpeg and yt-dlp processes.
+func (p *streamProvider) logSpawnedMemory() uint64 {
+	if p.proc == nil {
+		return 0
+	}
+	var total uint64
+
+	getRSS := func(cmd *exec.Cmd) uint64 {
+		if cmd == nil || cmd.Process == nil {
+			return 0
+		}
+		pid := cmd.Process.Pid
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
+		if err != nil {
+			return 0
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) < 2 {
+			return 0
+		}
+		rssPages, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return rssPages * uint64(os.Getpagesize())
+	}
+
+	ffmpegMem := getRSS(p.proc.cmd)
+	ytDlpMem := getRSS(p.proc.upstream)
+	total = ffmpegMem + ytDlpMem
+
+	return total
 }
 
 // finishNatural marks the stream as finished due to upstream EOF or read

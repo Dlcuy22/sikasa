@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -261,6 +262,15 @@ enqueued as a single track and the caller will see it as the bare link.
 	      error:    only if the queue manipulation fails (currently never)
 */
 func (v *VoiceCtx) PlayYouTube(url string) (firstPos, added int, started bool, err error) {
+	if v.bot.cacheEnabled {
+		cachePath := v.bot.getCachePath(url)
+		if _, err := os.Stat(cachePath); err == nil {
+			v.log.Info("voice: play youtube found in local cache", "url", url, "path", cachePath)
+			pos, started, err := v.Enqueue(Track{Kind: TrackYouTube, Source: url})
+			return pos, 1, started, err
+		}
+	}
+
 	tracks, perr := probeYouTubeEntries(url)
 	if perr != nil || len(tracks) == 0 {
 		// Probe failed or returned nothing. Fall back to enqueuing the raw
@@ -278,11 +288,13 @@ func (v *VoiceCtx) PlayYouTube(url string) (firstPos, added int, started bool, e
 	v.mu.Unlock()
 
 	if !idle {
+		v.triggerPrefetch()
 		return firstPos, len(tracks), false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
 		return firstPos, len(tracks), false, err
 	}
+	v.triggerPrefetch()
 	return firstPos, len(tracks), true, nil
 }
 
@@ -305,11 +317,13 @@ func (v *VoiceCtx) Enqueue(t Track) (position int, started bool, err error) {
 	v.mu.Unlock()
 
 	if !idle {
+		v.triggerPrefetch()
 		return pos, false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
 		return pos, false, err
 	}
+	v.triggerPrefetch()
 	return pos, true, nil
 }
 
@@ -334,11 +348,13 @@ func (v *VoiceCtx) InsertNext(t Track) (position int, started bool, err error) {
 	v.mu.Unlock()
 
 	if !idle {
+		v.triggerPrefetch()
 		return pos, false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
 		return pos, false, err
 	}
+	v.triggerPrefetch()
 	return pos, true, nil
 }
 
@@ -358,6 +374,15 @@ inserting the raw URL as a single track.
 	      error:    spawn error when started==true and the pipeline fails
 */
 func (v *VoiceCtx) InsertNextYouTube(url string) (firstPos, added int, started bool, err error) {
+	if v.bot.cacheEnabled {
+		cachePath := v.bot.getCachePath(url)
+		if _, err := os.Stat(cachePath); err == nil {
+			v.log.Info("voice: insert next youtube found in local cache", "url", url, "path", cachePath)
+			pos, started, err := v.InsertNext(Track{Kind: TrackYouTube, Source: url})
+			return pos, 1, started, err
+		}
+	}
+
 	tracks, perr := probeYouTubeEntries(url)
 	if perr != nil || len(tracks) == 0 {
 		pos, started, err := v.InsertNext(Track{Kind: TrackYouTube, Source: url})
@@ -371,11 +396,13 @@ func (v *VoiceCtx) InsertNextYouTube(url string) (firstPos, added int, started b
 	v.mu.Unlock()
 
 	if !idle {
+		v.triggerPrefetch()
 		return first, len(tracks), false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
 		return first, len(tracks), false, err
 	}
+	v.triggerPrefetch()
 	return first, len(tracks), true, nil
 }
 
@@ -499,9 +526,27 @@ Combine with Stop() to halt playback and reset state in one shot.
 */
 func (v *VoiceCtx) ClearQueue() {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	v.queue.Clear()
+	v.mu.Unlock()
+	v.triggerPrefetch()
 }
+
+/*
+Shuffle randomizes the order of queued tracks after the currently playing one.
+Returns ErrQueueEmpty if there are no tracks waiting in the queue.
+*/
+func (v *VoiceCtx) Shuffle() error {
+	v.mu.Lock()
+	if v.queue.Len() == 0 || v.queue.Cursor()+2 >= v.queue.Len() {
+		v.mu.Unlock()
+		return ErrQueueEmpty
+	}
+	v.queue.Shuffle()
+	v.mu.Unlock()
+	v.triggerPrefetch()
+	return nil
+}
+
 
 /*
 Pause stops sending audio frames. The FFmpeg process and parser stay alive,
@@ -670,20 +715,28 @@ func (v *VoiceCtx) advanceAndPlay() error {
 // provider slot. Used by Enqueue (first track), Skip (manual advance), Prev
 // (rewind), and the auto-advance callback.
 func (v *VoiceCtx) playLoaded(t Track) error {
-	proc, err := spawnTrack(t)
+	proc, err := v.spawnTrack(t)
 	if err != nil {
 		return err
 	}
 	v.swapProvider(proc, t.Label())
+	v.triggerPrefetch()
 	return nil
 }
 
 // spawnTrack picks the right ffmpeg/yt-dlp recipe for a Track. Local files
 // hit the codec switch (passthrough for opus/ogg, transcode otherwise);
-// YouTube tracks always go through the yt-dlp -> ffmpeg pipe.
-func spawnTrack(t Track) (*ffmpegProcess, error) {
+// YouTube tracks go through local cache if available, else standard stream.
+func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 	switch t.Kind {
 	case TrackYouTube:
+		if v.bot.cacheEnabled {
+			cachePath := v.bot.getCachePath(t.Source)
+			if _, err := os.Stat(cachePath); err == nil {
+				v.log.Info("voice: playing from local cache", "url", t.Source, "path", cachePath)
+				return spawnPassthrough(cachePath)
+			}
+		}
 		return spawnYouTube(t.Source)
 	case TrackFile:
 		ext := strings.ToLower(filepath.Ext(t.Source))
@@ -704,7 +757,7 @@ func spawnTrack(t Track) (*ffmpegProcess, error) {
 // onDone callback hooks into auto-advance so the queue moves forward when a
 // track ends naturally.
 func (v *VoiceCtx) swapProvider(proc *ffmpegProcess, source string) {
-	newProv := newStreamProvider(proc)
+	newProv := newStreamProvider(proc, v.log, v.bot.musicLogInterval)
 	newProv.onDone = v.onTrackDone
 
 	v.mu.Lock()
@@ -758,3 +811,4 @@ func (v *VoiceCtx) announce(channelID snowflake.ID, text string) {
 		v.log.Debug("voice: announce failed", "channel_id", channelID.String(), "err", err)
 	}
 }
+
