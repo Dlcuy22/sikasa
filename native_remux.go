@@ -325,18 +325,22 @@ func initNativeRemuxer() error {
 getCodecParOffset returns the offset of codecpar within AVStream based on FFmpeg version.
 
     returns:
-          uintptr: offset of codecpar (120 for FFmpeg 4.x, 104 for FFmpeg 5.x+)
+          uintptr: offset of codecpar
 */
 func getCodecParOffset() uintptr {
 	if avformat_version == nil {
-		return 104
+		return 16 // default to FFmpeg 7.x
 	}
 	ver := avformat_version()
 	major := ver >> 16
-	if major == 58 {
-		return 120
+	switch major {
+	case 58:
+		return 120 // FFmpeg 4.x
+	case 59, 60:
+		return 104 // FFmpeg 5.x, 6.x
+	default:
+		return 16 // FFmpeg 7.x+
 	}
-	return 104
 }
 
 /*
@@ -382,8 +386,15 @@ getStreamTimeBase reads the time_base AVRational struct from AVStream.
           AVRational: read value
 */
 func getStreamTimeBase(streamPtr uintptr) AVRational {
-	// time_base is located at offset 16 bytes in AVStream (index=0, id=4, priv_data=8)
-	ptr := unsafe.Pointer(streamPtr + 16)
+	var offset uintptr = 32 // default to FFmpeg 7.x
+	if avformat_version != nil {
+		ver := avformat_version()
+		major := ver >> 16
+		if major <= 60 {
+			offset = 16 // FFmpeg 4.x, 5.x, 6.x
+		}
+	}
+	ptr := unsafe.Pointer(streamPtr + offset)
 	return *(*AVRational)(ptr)
 }
 
