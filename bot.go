@@ -295,6 +295,16 @@ func (b *Bot) WithRemuxMode(mode string) *Bot {
 	return b
 }
 
+/*
+RemuxMode returns the configured default remuxing mode for the bot.
+
+    returns:
+          string: the configured remuxing mode ("ffmpeg" or "native")
+*/
+func (b *Bot) RemuxMode() string {
+	return string(b.remuxMode)
+}
+
 
 /*
 Disgo returns the underlying *bot.Client as an escape hatch for features the
