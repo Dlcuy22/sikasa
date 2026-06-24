@@ -34,6 +34,16 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 )
 
+// RemuxMode describes the method used to remux/convert YouTube stream to Ogg-Opus.
+type RemuxMode string
+
+const (
+	// RemuxFFmpeg executes external ffmpeg processes (default/fallback).
+	RemuxFFmpeg RemuxMode = "ffmpeg"
+	// RemuxNative runs the native library remuxer using purego (experimental).
+	RemuxNative RemuxMode = "native"
+)
+
 // PlaybackState describes the current state of a VoiceCtx.
 type PlaybackState int32
 
@@ -117,11 +127,12 @@ func (m *VoiceManager) Join(guildID, channelID string) (*VoiceCtx, error) {
 	}
 
 	vctx := &VoiceCtx{
-		bot:     m.bot,
-		conn:    conn,
-		guildID: gid,
-		log:     log,
-		queue:   newQueue(),
+		bot:       m.bot,
+		conn:      conn,
+		guildID:   gid,
+		log:       log,
+		queue:     newQueue(),
+		remuxMode: m.bot.remuxMode,
 	}
 	vctx.state.Store(int32(StateIdle))
 
@@ -171,6 +182,7 @@ type VoiceCtx struct {
 	provider          *streamProvider
 	queue             *queue
 	announceChannelID snowflake.ID
+	remuxMode         RemuxMode
 }
 
 // Bot returns the parent *Bot. Mainly for symmetry with CmdCtx / MsgCtx.
@@ -187,6 +199,27 @@ them already replies in-place.
 	returns:
 	      *VoiceCtx: receiver, for chaining
 */
+/*
+WithRemuxMode configures the remuxing strategy for this voice connection.
+Accepted values: "ffmpeg" or "native".
+
+    params:
+          mode: the remuxing mode ("ffmpeg" or "native")
+    returns:
+          *VoiceCtx: receiver, for chaining
+*/
+func (v *VoiceCtx) WithRemuxMode(mode string) *VoiceCtx {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	switch RemuxMode(mode) {
+	case RemuxNative:
+		v.remuxMode = RemuxNative
+	default:
+		v.remuxMode = RemuxFFmpeg
+	}
+	return v
+}
+
 func (v *VoiceCtx) SetAnnounceChannel(channelID string) *VoiceCtx {
 	if channelID == "" {
 		v.mu.Lock()
@@ -737,7 +770,7 @@ func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 				return spawnPassthrough(cachePath)
 			}
 		}
-		return spawnYouTube(t.Source)
+		return spawnYouTube(t.Source, v.remuxMode)
 	case TrackFile:
 		ext := strings.ToLower(filepath.Ext(t.Source))
 		switch ext {
