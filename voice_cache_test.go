@@ -239,3 +239,59 @@ func TestCache_Shuffle(t *testing.T) {
 	}
 }
 
+/*
+TestBot_RemuxModeConfiguration verifies configuring RemuxMode on Bot and VoiceCtx.
+
+    params:
+          t: test runner context
+*/
+func TestBot_RemuxModeConfiguration(t *testing.T) {
+	bot, err := New("dummy_token")
+	if err != nil {
+		t.Fatalf("failed to create bot: %v", err)
+	}
+
+	// 1. Verify default
+	if bot.remuxMode != RemuxFFmpeg {
+		t.Errorf("expected default remuxMode to be %q, got %q", RemuxFFmpeg, bot.remuxMode)
+	}
+
+	// 2. Test Bot.WithRemuxMode
+	bot.WithRemuxMode("native")
+	if bot.remuxMode != RemuxNative {
+		t.Errorf("expected remuxMode to be %q after setting to native, got %q", RemuxNative, bot.remuxMode)
+	}
+
+	bot.WithRemuxMode("invalid-mode")
+	if bot.remuxMode != RemuxFFmpeg {
+		t.Errorf("expected invalid mode to fallback to %q, got %q", RemuxFFmpeg, bot.remuxMode)
+	}
+
+	// 3. Test VoiceCtx inheritance and WithRemuxMode
+	bot.WithRemuxMode("native")
+	vctx := &VoiceCtx{
+		bot:       bot,
+		remuxMode: bot.remuxMode,
+	}
+
+	if vctx.remuxMode != RemuxNative {
+		t.Errorf("expected VoiceCtx to inherit remuxMode %q, got %q", RemuxNative, vctx.remuxMode)
+	}
+
+	vctx.WithRemuxMode("ffmpeg")
+	if vctx.remuxMode != RemuxFFmpeg {
+		t.Errorf("expected VoiceCtx remuxMode to be set to %q, got %q", RemuxFFmpeg, vctx.remuxMode)
+	}
+
+	vctx.WithRemuxMode("native")
+	if vctx.remuxMode != RemuxNative {
+		t.Errorf("expected VoiceCtx remuxMode to be set to %q, got %q", RemuxNative, vctx.remuxMode)
+	}
+
+	vctx.WithRemuxMode("some-other-mode")
+	if vctx.remuxMode != RemuxFFmpeg {
+		t.Errorf("expected VoiceCtx invalid mode to fallback to %q, got %q", RemuxFFmpeg, vctx.remuxMode)
+	}
+}
+
+

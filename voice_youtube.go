@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,11 +38,15 @@ and returns the FFmpeg process whose stdout is Ogg-Opus.
 
     params:
           url: any URL yt-dlp can resolve (YouTube, SoundCloud, etc.)
+          mode: the remuxing strategy to use (FFmpeg subprocess or Native purego)
     returns:
           *ffmpegProcess: kill this to terminate the whole pipeline
           error:          if yt-dlp or ffmpeg cannot be spawned
 */
-func spawnYouTube(url string) (*ffmpegProcess, error) {
+func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
+	if mode == RemuxNative {
+		log.Printf("sikasa: native remuxing is not yet implemented; falling back to ffmpeg")
+	}
 	// Look for a local Bun installation to speed up signature decryption.
 	bunPath := ""
 	home, err := os.UserHomeDir()

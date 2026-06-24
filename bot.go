@@ -113,6 +113,7 @@ type Bot struct {
 	prefetchNotify   chan struct{}
 	prefetchCtx      context.Context
 	prefetchCancel   context.CancelFunc
+	remuxMode        RemuxMode
 }
 
 /*
@@ -143,6 +144,7 @@ func New(token string) (*Bot, error) {
 		prefetchNotify:   make(chan struct{}, 1),
 		prefetchCtx:      ctx,
 		prefetchCancel:   cancel,
+		remuxMode:        RemuxFFmpeg,
 	}, nil
 }
 
@@ -273,6 +275,26 @@ func (b *Bot) WithMusicLogInterval(d time.Duration) *Bot {
 	b.musicLogInterval = d
 	return b
 }
+
+/*
+WithRemuxMode configures the default remuxing strategy for new voice connections.
+Accepted values are "ffmpeg" or "native".
+
+    params:
+          mode: the remuxing mode ("ffmpeg" or "native")
+    returns:
+          *Bot: receiver, for chaining
+*/
+func (b *Bot) WithRemuxMode(mode string) *Bot {
+	switch RemuxMode(mode) {
+	case RemuxNative:
+		b.remuxMode = RemuxNative
+	default:
+		b.remuxMode = RemuxFFmpeg
+	}
+	return b
+}
+
 
 /*
 Disgo returns the underlying *bot.Client as an escape hatch for features the
