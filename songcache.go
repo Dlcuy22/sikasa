@@ -111,56 +111,82 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 		return
 	}
 
-	// Remux WebM/Opus format into an Ogg container on-the-fly.
-	ffArgs := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-i", "pipe:0",
-		"-vn",
-		"-c:a", "copy",
-		"-f", "ogg",
-		"pipe:1",
-	}
-	ff := exec.CommandContext(ctx, "ffmpeg", ffArgs...)
-	ff.Stdin = ytStdout
-	ffStdout, err := ff.StdoutPipe()
-	if err != nil {
-		b.vlog().Error("voice: prefetch ffmpeg pipe failed", "url", url, "err", err)
-		return
+	remuxDone := false
+	if b.remuxMode == RemuxNative {
+		if err := yt.Start(); err == nil {
+			remuxErr := RemuxStream(ytStdout, tmpPath)
+			_ = yt.Process.Kill()
+			_ = yt.Wait()
+			if remuxErr == nil {
+				remuxDone = true
+			} else {
+				b.vlog().Error("voice: native prefetch remux failed; falling back to ffmpeg", "url", url, "err", remuxErr)
+				os.Remove(tmpPath)
+				// Re-prepare yt-dlp for fallback
+				yt = exec.CommandContext(ctx, "yt-dlp", ytArgs...)
+				ytStdout, err = yt.StdoutPipe()
+				if err != nil {
+					b.vlog().Error("voice: prefetch fallback yt-dlp pipe failed", "url", url, "err", err)
+					return
+				}
+			}
+		} else {
+			b.vlog().Error("voice: prefetch spawn yt-dlp failed for native remux", "url", url, "err", err)
+		}
 	}
 
-	outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		b.vlog().Error("voice: prefetch write file open failed", "url", url, "err", err)
-		return
-	}
-	defer outFile.Close()
+	if !remuxDone {
+		// Remux WebM/Opus format into an Ogg container on-the-fly using FFmpeg subprocess.
+		ffArgs := []string{
+			"-hide_banner", "-loglevel", "error",
+			"-i", "pipe:0",
+			"-vn",
+			"-c:a", "copy",
+			"-f", "ogg",
+			"pipe:1",
+		}
+		ff := exec.CommandContext(ctx, "ffmpeg", ffArgs...)
+		ff.Stdin = ytStdout
+		ffStdout, err := ff.StdoutPipe()
+		if err != nil {
+			b.vlog().Error("voice: prefetch ffmpeg pipe failed", "url", url, "err", err)
+			return
+		}
 
-	if err := yt.Start(); err != nil {
-		b.vlog().Error("voice: prefetch spawn yt-dlp failed", "url", url, "err", err)
-		os.Remove(tmpPath)
-		return
-	}
-	defer func() {
-		_ = yt.Process.Kill()
-		_ = yt.Wait()
-	}()
+		outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			b.vlog().Error("voice: prefetch write file open failed", "url", url, "err", err)
+			return
+		}
+		defer outFile.Close()
 
-	if err := ff.Start(); err != nil {
-		b.vlog().Error("voice: prefetch spawn ffmpeg failed", "url", url, "err", err)
-		os.Remove(tmpPath)
-		return
-	}
-	defer func() {
-		_ = ff.Process.Kill()
+		if err := yt.Start(); err != nil {
+			b.vlog().Error("voice: prefetch spawn yt-dlp failed", "url", url, "err", err)
+			os.Remove(tmpPath)
+			return
+		}
+		defer func() {
+			_ = yt.Process.Kill()
+			_ = yt.Wait()
+		}()
+
+		if err := ff.Start(); err != nil {
+			b.vlog().Error("voice: prefetch spawn ffmpeg failed", "url", url, "err", err)
+			os.Remove(tmpPath)
+			return
+		}
+		defer func() {
+			_ = ff.Process.Kill()
+			_ = ff.Wait()
+		}()
+
+		// Stream remuxed audio from ffmpeg stdout to our temporary file.
+		_, err = io.Copy(outFile, ffStdout)
+		_ = outFile.Close()
+
 		_ = ff.Wait()
-	}()
-
-	// Stream remuxed audio from ffmpeg stdout to our temporary file.
-	_, err = io.Copy(outFile, ffStdout)
-	_ = outFile.Close()
-
-	_ = ff.Wait()
-	_ = yt.Wait()
+		_ = yt.Wait()
+	}
 
 	if err == nil && ctx.Err() == nil {
 		// Verify file size is non-zero before concluding success.

@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -44,9 +45,6 @@ and returns the FFmpeg process whose stdout is Ogg-Opus.
           error:          if yt-dlp or ffmpeg cannot be spawned
 */
 func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
-	if mode == RemuxNative {
-		log.Printf("sikasa: native remuxing is not yet implemented; falling back to ffmpeg")
-	}
 	// Look for a local Bun installation to speed up signature decryption.
 	bunPath := ""
 	home, err := os.UserHomeDir()
@@ -66,6 +64,42 @@ func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
 		ytArgs = append(ytArgs, "--js-runtimes", "bun:"+bunPath)
 	}
 	ytArgs = append(ytArgs, url)
+
+	remuxNativeSupported := false
+	if mode == RemuxNative {
+		if err := initNativeRemuxer(); err == nil {
+			remuxNativeSupported = true
+		} else {
+			log.Printf("sikasa: native remuxing not available; falling back to ffmpeg: %v", err)
+		}
+	}
+
+	if remuxNativeSupported {
+		yt := exec.Command("yt-dlp", ytArgs...)
+		ytStdout, err := yt.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("sikasa: yt-dlp stdout pipe: %w", err)
+		}
+		if err := yt.Start(); err != nil {
+			return nil, fmt.Errorf("sikasa: spawn yt-dlp: %w (is it installed?)", err)
+		}
+
+		pr, pw := io.Pipe()
+		go func() {
+			remuxErr := RemuxStreamToWriter(ytStdout, pw)
+			if remuxErr != nil {
+				log.Printf("sikasa: native remux error: %v", remuxErr)
+				_ = pw.CloseWithError(remuxErr)
+			} else {
+				_ = pw.Close()
+			}
+		}()
+
+		return &ffmpegProcess{
+			stdout:   pr,
+			upstream: yt,
+		}, nil
+	}
 
 	yt := exec.Command("yt-dlp", ytArgs...)
 	ytStdout, err := yt.StdoutPipe()
