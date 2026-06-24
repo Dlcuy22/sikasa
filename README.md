@@ -5,14 +5,13 @@ Sikasa (see-KAH-sah) is a high-level, fluent wrapper around the modern [disgoorg
 ## Why Sikasa?
 
 Writing a bot in raw `disgo` still involves repetitive boilerplate for things that should be simple:
+
 - Wiring slash command definitions, the `handler.Router`, and the option parser separately.
 - Building `discord.MessageCreate` chains for every reply variant.
 - Manually constructing `MessageReference` for inline replies.
 - The 15-line `os.Open` + `defer Close()` + `AddFile` dance just to send an image.
 
 Sikasa solves this by providing a **Builder pattern**, context helpers (`CmdCtx` and `MsgCtx`), and automatic command registration on top of disgo.
-
-> **Migration note:** Sikasa originally wrapped `bwmarrin/discordgo`. It has been rewritten on top of disgo because Discord now enforces the **DAVE (E2EE)** protocol in many voice regions, which discordgo does not support (close code 4017). disgo ships native DAVE support via [thomas-vilte/dave-go](https://github.com/thomas-vilte/dave-go). The escape hatch was renamed from `.DiscordGo()` to `.Disgo()` and now returns a `*bot.Client`. Everything else in the public API is unchanged.
 
 ## Features
 
@@ -26,16 +25,17 @@ Sikasa solves this by providing a **Builder pattern**, context helpers (`CmdCtx`
 - **Rate Limiting**: Optional sliding-window rate limit on keyword replies.
 - **Sentinel Errors**: Exported `Err*` values so callers can branch on `errors.Is(err, sikasa.ErrXxx)`.
 - **Escape Hatches**: Drop down to disgo via `.Disgo()`, `.Event()`, or `.Data()` if Sikasa doesn't cover your specific need.
+- **Battery-Included Core Services**: Bundles common Discord bot features like high-performance voice and music playback out-of-the-box, with more common bot utility features planned for future releases.
 
 ## Requirements
 
-- Go 1.22+
-- `ffmpeg` on `PATH` (only required for `PlayFile` / `PlayYouTube`)
-- `yt-dlp` on `PATH` (only required for `PlayYouTube`)
-
-DAVE (E2EE voice) is built in via the pure-Go [dave-go](https://github.com/thomas-vilte/dave-go) backend; no extra setup needed.
+- Go 1.26+
+- **Automated Dependency Installer**: For voice and music playback features, Sikasa automatically detects, downloads, and installs any missing external binaries (`ffmpeg` shared libraries, `yt-dlp`, and `bun` for decryption acceleration) into a local sandbox directory (`~/.sikasa/bin`) on first startup. You do not need to install them manually.
+- `ffmpeg` on `PATH` (only if you want to bypass the automated installer with your own system-wide installation)
+- `yt-dlp` on `PATH` (only if you want to bypass the automated installer with your own system-wide installation)
 
 Install on common platforms:
+
 ```bash
 # Linux (Debian/Ubuntu)
 sudo apt install ffmpeg && pipx install yt-dlp
@@ -103,6 +103,7 @@ func main() {
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
+    bot.Shutdown()
 }
 ```
 
@@ -125,6 +126,7 @@ bot.Command("avatar", "Get user avatar").
 ```
 
 **Context Helpers:**
+
 - `ctx.Reply("text")`
 - `ctx.ReplyEphemeral("secret text")`
 - `ctx.ReplyFile("text", "path.png")`
@@ -148,6 +150,7 @@ bot.OnRegex(`(?i)^ping\s+\d+$`).
 ```
 
 **Context Helpers:**
+
 - `ctx.Reply("text")` (Sends as an inline reply to the user)
 - `ctx.Send("text")` (Sends a normal message to the channel)
 - `ctx.ReplyFile()`, `ctx.ReplyURL()`, `ctx.React("👍")`
@@ -198,6 +201,7 @@ bot.OnPrefix("add", "Adds two integers").
 ```
 
 **Behavior:**
+
 - The last `StringArg` consumes the entire remaining message tail, so `!echo hello world` puts `"hello world"` into the `text` arg.
 - Aliases dispatch to the same handler. `!e` and `!say` both run the `echo` builder.
 - Command name lookup is case-insensitive (`!Echo` works); the prefix itself is case-sensitive.
@@ -258,6 +262,7 @@ bot.Command("play", "Play a song").
 ```
 
 YouTube playback (requires `yt-dlp`):
+
 ```go
 vctx.PlayYouTube("https://youtu.be/dQw4w9WgXcQ")
 ```
@@ -308,6 +313,7 @@ if started {
 ```
 
 Queue control:
+
 ```go
 vctx.Skip()         // advance to the next track (alias: Next)
 vctx.Prev()         // rewind cursor by one and play that track
@@ -318,6 +324,7 @@ vctx.ClearQueue()   // empty the queue (current track keeps playing)
 ```
 
 Per-track control:
+
 ```go
 vctx.Pause()
 vctx.Resume()
@@ -331,6 +338,7 @@ The bot watches its own log stream for DAVE/voice errors (`"no active epoch"`, `
 Multi-guild sessions are automatic: each guild gets its own `VoiceCtx` (and therefore its own queue, cursor, and FFmpeg pipeline), so the bot can play different music in two servers concurrently without any extra wiring.
 
 Retrieve an existing connection from anywhere:
+
 ```go
 vctx := bot.Voice().Get(guildID)  // nil if not connected
 ```
@@ -344,6 +352,7 @@ bot.OnKeyword("sikasa").
     ReplyFile("ongo", "media/pp.jpg",
         sikasa.RateLimitInterval(1, 10*time.Second))
 ```
+
 A given user can trigger this rule at most once per 10 seconds; extra messages are silently dropped.
 
 ## Errors
@@ -357,21 +366,21 @@ if errors.Is(err, sikasa.ErrInvalidGuildID) {
 }
 ```
 
-| Sentinel | Source |
-|---|---|
-| `ErrEmptyToken` | `sikasa.New("")` |
-| `ErrBotNotStarted` | Voice operations called before `bot.Start()` |
-| `ErrInvalidGuildID` | Guild snowflake fails to parse |
-| `ErrInvalidChannelID` | Channel snowflake fails to parse |
-| `ErrNotInVoice` | Voice operation requires an active connection |
-| `ErrNoAudio` | `Pause()` called while nothing is playing |
-| `ErrNotPaused` | `Resume()` called outside the paused state |
-| `ErrUnknownCommand` | Prefix dispatch finds no matching command |
-| `ErrMissingArg` | Required builder argument absent from the message |
-| `ErrInvalidArg` | Argument value fails type parsing (e.g. `IntArg` got non-numeric) |
-| `ErrQueueEmpty` | Queue navigation called on an empty queue |
-| `ErrNoPrevious` | `Prev()` called while the cursor is already at the first track |
-| `ErrNotSameChannel` | `RequireSameVoice()` gate rejected the invoker |
+| Sentinel              | Source                                                            |
+| --------------------- | ----------------------------------------------------------------- |
+| `ErrEmptyToken`       | `sikasa.New("")`                                                  |
+| `ErrBotNotStarted`    | Voice operations called before `bot.Start()`                      |
+| `ErrInvalidGuildID`   | Guild snowflake fails to parse                                    |
+| `ErrInvalidChannelID` | Channel snowflake fails to parse                                  |
+| `ErrNotInVoice`       | Voice operation requires an active connection                     |
+| `ErrNoAudio`          | `Pause()` called while nothing is playing                         |
+| `ErrNotPaused`        | `Resume()` called outside the paused state                        |
+| `ErrUnknownCommand`   | Prefix dispatch finds no matching command                         |
+| `ErrMissingArg`       | Required builder argument absent from the message                 |
+| `ErrInvalidArg`       | Argument value fails type parsing (e.g. `IntArg` got non-numeric) |
+| `ErrQueueEmpty`       | Queue navigation called on an empty queue                         |
+| `ErrNoPrevious`       | `Prev()` called while the cursor is already at the first track    |
+| `ErrNotSameChannel`   | `RequireSameVoice()` gate rejected the invoker                    |
 
 ## Escape Hatches
 
@@ -390,15 +399,14 @@ client.Rest.CreateMessage(channelID, discord.NewMessageCreate().AddEmbeds(myEmbe
 ## Roadmap / TODO
 
 Voice features deferred from this iteration:
+
 - Real-time **volume** control (currently fixed at 100%; would need PCM-side gain or FFmpeg restart)
 - **AudioProvider** chaining for custom audio sources (Spotify, custom TTS, raw PCM)
 - **Voice receive** (decoding user audio; disgo exposes `OpusFrameReceiver` but Sikasa hasn't surfaced it yet)
 - **Lavalink** mode for production deployments at scale
 
 Now that disgo is the underlying library, the following also become easy follow-ons:
+
 - **Components** (buttons, select menus) via disgo's handler router
 - **Modals** with the same path-pattern API
 - **Threads, polls, business connections** that disgo supports natively
-
-## License
-MIT

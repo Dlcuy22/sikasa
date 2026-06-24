@@ -161,7 +161,7 @@ func spawnRemuxFromStdin(stdin io.Reader) (*ffmpegProcess, error) {
 // run is the shared spawn helper. It wires up stdout (always) and stdin
 // (when provided), starts the process, and returns the wrapper.
 func run(bin string, args []string, stdin io.Reader) (*ffmpegProcess, error) {
-	cmd := exec.Command(bin, args...)
+	cmd := exec.Command(ResolveBinaryPath(bin), args...)
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}

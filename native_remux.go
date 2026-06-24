@@ -344,6 +344,24 @@ func getCodecParOffset() uintptr {
 }
 
 /*
+getPacketDurationOffset returns the offset of duration within AVPacket based on FFmpeg version.
+
+    returns:
+          uintptr: offset of duration
+*/
+func getPacketDurationOffset() uintptr {
+	if avformat_version == nil {
+		return 64 // default to FFmpeg 7.x
+	}
+	ver := avformat_version()
+	major := ver >> 16
+	if major <= 60 {
+		return 48
+	}
+	return 64
+}
+
+/*
 getStreamCodecID reads the codec_id from AVCodecParameters.
 
     params:
@@ -569,6 +587,8 @@ func RemuxStream(reader io.Reader, outPath string) error {
 		return fmt.Errorf("failed to allocate packet")
 	}
 
+	durOffset := getPacketDurationOffset()
+
 	for {
 		if ret := av_read_frame(inFormatCtxPtr, pkt); ret < 0 {
 			break // EOF or error
@@ -589,8 +609,8 @@ func RemuxStream(reader io.Reader, outPath string) error {
 			dts := *(*int64)(unsafe.Pointer(pkt + 16))
 			*(*int64)(unsafe.Pointer(pkt + 16)) = avRescaleQ(dts, inTB, outTB)
 
-			duration := *(*int64)(unsafe.Pointer(pkt + 48))
-			*(*int64)(unsafe.Pointer(pkt + 48)) = avRescaleQ(duration, inTB, outTB)
+			duration := *(*int64)(unsafe.Pointer(pkt + durOffset))
+			*(*int64)(unsafe.Pointer(pkt + durOffset)) = avRescaleQ(duration, inTB, outTB)
 
 			_ = av_interleaved_write_frame(outFormatCtx, pkt)
 		}
@@ -808,6 +828,8 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 		return fmt.Errorf("failed to allocate packet")
 	}
 
+	durOffset := getPacketDurationOffset()
+
 	for {
 		if ret := av_read_frame(inFormatCtxPtr, pkt); ret < 0 {
 			break // EOF or error
@@ -828,8 +850,8 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 			dts := *(*int64)(unsafe.Pointer(pkt + 16))
 			*(*int64)(unsafe.Pointer(pkt + 16)) = avRescaleQ(dts, inTB, outTB)
 
-			duration := *(*int64)(unsafe.Pointer(pkt + 48))
-			*(*int64)(unsafe.Pointer(pkt + 48)) = avRescaleQ(duration, inTB, outTB)
+			duration := *(*int64)(unsafe.Pointer(pkt + durOffset))
+			*(*int64)(unsafe.Pointer(pkt + durOffset)) = avRescaleQ(duration, inTB, outTB)
 
 			_ = av_interleaved_write_frame(outFormatCtx, pkt)
 		}

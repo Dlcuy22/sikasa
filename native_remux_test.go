@@ -12,6 +12,8 @@
 package sikasa
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,5 +69,67 @@ func TestNativeRemux_EmptyReader(t *testing.T) {
 	err := RemuxStream(strings.NewReader(""), tmpFile)
 	if err == nil {
 		t.Error("expected error when remuxing empty input; got nil")
+	}
+}
+
+/*
+TestNativeRemux_ValidWebm verifies that remuxing a valid WebM/Opus file to Ogg/Opus
+succeeds without error and without crashing.
+
+    params:
+          t: test runner context
+*/
+func TestNativeRemux_ValidWebm(t *testing.T) {
+	if err := initNativeRemuxer(); err != nil {
+		t.Skipf("FFmpeg shared libraries not available: %v", err)
+	}
+
+	inFile, err := os.Open("tiny.webm")
+	if err != nil {
+		t.Skipf("tiny.webm not found, skipping test: %v", err)
+	}
+	defer inFile.Close()
+
+	tmpFile := filepath.Join(t.TempDir(), "output.ogg")
+	err = RemuxStream(inFile, tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error when remuxing valid WebM input; got %v", err)
+	}
+
+	fi, err := os.Stat(tmpFile)
+	if err != nil {
+		t.Fatalf("expected output file to exist: %v", err)
+	}
+	if fi.Size() == 0 {
+		t.Error("expected output file to be non-empty")
+	}
+}
+
+/*
+TestNativeRemux_ToWriter verifies that RemuxStreamToWriter successfully remuxes
+a valid WebM/Opus stream directly to a writer.
+
+    params:
+          t: test runner context
+*/
+func TestNativeRemux_ToWriter(t *testing.T) {
+	if err := initNativeRemuxer(); err != nil {
+		t.Skipf("FFmpeg shared libraries not available: %v", err)
+	}
+
+	inFile, err := os.Open("tiny.webm")
+	if err != nil {
+		t.Skipf("tiny.webm not found, skipping test: %v", err)
+	}
+	defer inFile.Close()
+
+	var buf bytes.Buffer
+	err = RemuxStreamToWriter(inFile, &buf)
+	if err != nil {
+		t.Fatalf("expected no error when remuxing valid WebM input directly to writer; got %v", err)
+	}
+
+	if buf.Len() == 0 {
+		t.Error("expected written buffer to be non-empty")
 	}
 }

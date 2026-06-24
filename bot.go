@@ -338,6 +338,10 @@ complete; events run in disgo-managed goroutines from there.
 	      error: if client construction, gateway open, or command sync fails
 */
 func (b *Bot) Start() error {
+	if err := ensureDependencies(); err != nil {
+		b.logger.Printf("sikasa: warning, dependency check/installation failed: %v", err)
+	}
+
 	b.router = handler.New()
 
 	for _, c := range b.cmds {

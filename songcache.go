@@ -84,14 +84,10 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 
 	tmpPath := cachePath + ".tmp"
 
-	// Look for a local Bun installation to speed up signature decryption.
+	// Look for a Bun installation to speed up signature decryption.
 	bunPath := ""
-	home, err := os.UserHomeDir()
-	if err == nil {
-		bp := filepath.Join(home, ".bun", "bin", "bun")
-		if _, err := os.Stat(bp); err == nil {
-			bunPath = bp
-		}
+	if bp := ResolveBinaryPath("bun"); bp != "bun" && bp != "bun.exe" {
+		bunPath = bp
 	}
 
 	ytArgs := []string{
@@ -104,7 +100,7 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 	}
 	ytArgs = append(ytArgs, url)
 
-	yt := exec.CommandContext(ctx, "yt-dlp", ytArgs...)
+	yt := exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
 	ytStdout, err := yt.StdoutPipe()
 	if err != nil {
 		b.vlog().Error("voice: prefetch yt-dlp pipe failed", "url", url, "err", err)
@@ -123,7 +119,7 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 				b.vlog().Error("voice: native prefetch remux failed; falling back to ffmpeg", "url", url, "err", remuxErr)
 				os.Remove(tmpPath)
 				// Re-prepare yt-dlp for fallback
-				yt = exec.CommandContext(ctx, "yt-dlp", ytArgs...)
+				yt = exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
 				ytStdout, err = yt.StdoutPipe()
 				if err != nil {
 					b.vlog().Error("voice: prefetch fallback yt-dlp pipe failed", "url", url, "err", err)
@@ -145,7 +141,7 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 			"-f", "ogg",
 			"pipe:1",
 		}
-		ff := exec.CommandContext(ctx, "ffmpeg", ffArgs...)
+		ff := exec.CommandContext(ctx, ResolveBinaryPath("ffmpeg"), ffArgs...)
 		ff.Stdin = ytStdout
 		ffStdout, err := ff.StdoutPipe()
 		if err != nil {

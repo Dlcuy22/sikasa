@@ -75,7 +75,7 @@ func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
 	}
 
 	if remuxNativeSupported {
-		yt := exec.Command("yt-dlp", ytArgs...)
+		yt := exec.Command(ResolveBinaryPath("yt-dlp"), ytArgs...)
 		ytStdout, err := yt.StdoutPipe()
 		if err != nil {
 			return nil, fmt.Errorf("sikasa: yt-dlp stdout pipe: %w", err)
@@ -101,7 +101,7 @@ func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
 		}, nil
 	}
 
-	yt := exec.Command("yt-dlp", ytArgs...)
+	yt := exec.Command(ResolveBinaryPath("yt-dlp"), ytArgs...)
 	ytStdout, err := yt.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("sikasa: yt-dlp stdout pipe: %w", err)
@@ -144,7 +144,7 @@ func probeYouTubeEntries(url string) ([]Track, error) {
 		"--print", "%(uploader)s",
 		url,
 	}
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	cmd := exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
