@@ -42,6 +42,7 @@ var (
 	av_packet_unref func(pkt uintptr)
 
 	// libavformat functions
+	avformat_version               func() uint32
 	avio_alloc_context             func(buffer uintptr, bufferSize int32, writeFlag int32, opaque uintptr, readPacket uintptr, writePacket uintptr, seek uintptr) uintptr
 	avformat_alloc_context         func() uintptr
 	avformat_open_input            func(ps *uintptr, url *byte, fmt uintptr, options *uintptr) int32
@@ -268,6 +269,7 @@ func loadFFmpegLibraries() error {
 	purego.RegisterLibFunc(&av_packet_unref, libavcodecHandle, "av_packet_unref")
 
 	// Register libavformat symbols
+	purego.RegisterLibFunc(&avformat_version, libavformatHandle, "avformat_version")
 	purego.RegisterLibFunc(&avio_alloc_context, libavformatHandle, "avio_alloc_context")
 	purego.RegisterLibFunc(&avformat_alloc_context, libavformatHandle, "avformat_alloc_context")
 	purego.RegisterLibFunc(&avformat_open_input, libavformatHandle, "avformat_open_input")
@@ -319,29 +321,55 @@ func initNativeRemuxer() error {
 }
 
 /*
-findCodecParOffset dynamically scans AVStream for codecpar pointer to
-support multiple FFmpeg versions.
+getCodecParOffset returns the offset of codecpar within AVStream based on FFmpeg version.
+
+    returns:
+          uintptr: offset of codecpar (120 for FFmpeg 4.x, 104 for FFmpeg 5.x+)
+*/
+func getCodecParOffset() uintptr {
+	if avformat_version == nil {
+		return 104
+	}
+	ver := avformat_version()
+	major := ver >> 16
+	if major == 58 {
+		return 120
+	}
+	return 104
+}
+
+/*
+getStreamCodecID reads the codec_id from AVCodecParameters.
 
     params:
           streamPtr: pointer to AVStream
+          codecParOffset: offset of codecpar in AVStream
     returns:
-          uintptr: offset of codecpar within AVStream (or 0 if not found)
+          int32: codec ID value
 */
-func findCodecParOffset(streamPtr uintptr) uintptr {
-	// Scan streamPtr at 8-byte boundaries from offset 24 to 256
-	for offset := uintptr(24); offset < 256; offset += 8 {
-		ptrVal := *(*uintptr)(unsafe.Pointer(streamPtr + offset))
-		if ptrVal == 0 {
-			continue
-		}
-		// AVMEDIA_TYPE_AUDIO is 1, AV_CODEC_ID_OPUS is 86076
-		codecType := *(*int32)(unsafe.Pointer(ptrVal))
-		codecID := *(*int32)(unsafe.Pointer(ptrVal + 4))
-		if codecType == 1 && codecID == 86076 {
-			return offset
-		}
+func getStreamCodecID(streamPtr uintptr, codecParOffset uintptr) int32 {
+	codecParPtr := *(*uintptr)(unsafe.Pointer(streamPtr + codecParOffset))
+	if codecParPtr == 0 {
+		return 0
 	}
-	return 0
+	return *(*int32)(unsafe.Pointer(codecParPtr + 4))
+}
+
+/*
+getStreamCodecType reads the codec_type from AVCodecParameters.
+
+    params:
+          streamPtr: pointer to AVStream
+          codecParOffset: offset of codecpar in AVStream
+    returns:
+          int32: codec type value
+*/
+func getStreamCodecType(streamPtr uintptr, codecParOffset uintptr) int32 {
+	codecParPtr := *(*uintptr)(unsafe.Pointer(streamPtr + codecParOffset))
+	if codecParPtr == 0 {
+		return -1
+	}
+	return *(*int32)(unsafe.Pointer(codecParPtr))
 }
 
 /*
@@ -457,15 +485,15 @@ func RemuxStream(reader io.Reader, outPath string) error {
 	streamsPtr := *(*uintptr)(unsafe.Pointer(inFormatCtxPtr + 48))
 	var audioStreamIndex int = -1
 	var audioStreamPtr uintptr
-	var codecParOffset uintptr
+	codecParOffset := getCodecParOffset()
 
 	for i := uint32(0); i < nbStreams; i++ {
 		streamPtr := *(*uintptr)(unsafe.Pointer(streamsPtr + uintptr(i)*8))
-		offset := findCodecParOffset(streamPtr)
-		if offset != 0 {
+		codecID := getStreamCodecID(streamPtr, codecParOffset)
+		codecType := getStreamCodecType(streamPtr, codecParOffset)
+		if codecType == 1 && codecID == 86076 {
 			audioStreamIndex = int(i)
 			audioStreamPtr = streamPtr
-			codecParOffset = offset
 			break
 		}
 	}
@@ -704,15 +732,15 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 	streamsPtr := *(*uintptr)(unsafe.Pointer(inFormatCtxPtr + 48))
 	var audioStreamIndex int = -1
 	var audioStreamPtr uintptr
-	var codecParOffset uintptr
+	codecParOffset := getCodecParOffset()
 
 	for i := uint32(0); i < nbStreams; i++ {
 		streamPtr := *(*uintptr)(unsafe.Pointer(streamsPtr + uintptr(i)*8))
-		offset := findCodecParOffset(streamPtr)
-		if offset != 0 {
+		codecID := getStreamCodecID(streamPtr, codecParOffset)
+		codecType := getStreamCodecType(streamPtr, codecParOffset)
+		if codecType == 1 && codecID == 86076 {
 			audioStreamIndex = int(i)
 			audioStreamPtr = streamPtr
-			codecParOffset = offset
 			break
 		}
 	}
