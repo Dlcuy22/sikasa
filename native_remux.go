@@ -16,6 +16,7 @@ package sikasa
 import (
 	"fmt"
 	"io"
+	"log"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -487,10 +488,12 @@ func RemuxStream(reader io.Reader, outPath string) error {
 	var audioStreamPtr uintptr
 	codecParOffset := getCodecParOffset()
 
+	log.Printf("DEBUG RemuxStream: nbStreams=%d codecParOffset=%d", nbStreams, codecParOffset)
 	for i := uint32(0); i < nbStreams; i++ {
 		streamPtr := *(*uintptr)(unsafe.Pointer(streamsPtr + uintptr(i)*8))
 		codecID := getStreamCodecID(streamPtr, codecParOffset)
 		codecType := getStreamCodecType(streamPtr, codecParOffset)
+		log.Printf("DEBUG Stream %d: streamPtr=%x codecID=%d codecType=%d", i, streamPtr, codecID, codecType)
 		if codecType == 1 && codecID == 86076 {
 			audioStreamIndex = int(i)
 			audioStreamPtr = streamPtr
@@ -734,10 +737,12 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 	var audioStreamPtr uintptr
 	codecParOffset := getCodecParOffset()
 
+	log.Printf("DEBUG RemuxStreamToWriter: nbStreams=%d codecParOffset=%d", nbStreams, codecParOffset)
 	for i := uint32(0); i < nbStreams; i++ {
 		streamPtr := *(*uintptr)(unsafe.Pointer(streamsPtr + uintptr(i)*8))
 		codecID := getStreamCodecID(streamPtr, codecParOffset)
 		codecType := getStreamCodecType(streamPtr, codecParOffset)
+		log.Printf("DEBUG Stream %d: streamPtr=%x codecID=%d codecType=%d", i, streamPtr, codecID, codecType)
 		if codecType == 1 && codecID == 86076 {
 			audioStreamIndex = int(i)
 			audioStreamPtr = streamPtr
