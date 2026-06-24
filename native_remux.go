@@ -520,7 +520,8 @@ func RemuxStream(reader io.Reader, outPath string) error {
 	// 4. Setup output format context
 	var outFormatCtx uintptr
 	cOutPath := append([]byte(outPath), 0)
-	if ret := avformat_alloc_output_context2(&outFormatCtx, 0, nil, &cOutPath[0]); ret < 0 {
+	cOgg := append([]byte("ogg"), 0)
+	if ret := avformat_alloc_output_context2(&outFormatCtx, 0, &cOgg[0], &cOutPath[0]); ret < 0 {
 		avformat_close_input(&inFormatCtxPtr)
 		return fmt.Errorf("avformat_alloc_output_context2 failed: %d", ret)
 	}
@@ -766,7 +767,7 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 		return fmt.Errorf("opus audio stream not found in input")
 	}
 
-	// 5. Setup output format context
+	// 4. Setup output format context
 	var outFormatCtx uintptr
 	cOgg := append([]byte("ogg"), 0)
 	if ret := avformat_alloc_output_context2(&outFormatCtx, 0, &cOgg[0], nil); ret < 0 {
