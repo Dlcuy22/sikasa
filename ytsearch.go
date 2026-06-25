@@ -59,7 +59,7 @@ const (
 //   - id:        random 12-char base32 string used as the session lookup key
 //   - invoker:   user who issued the search; only this user may click results
 //   - guildID:   guild where the search lives, used by handlers to route
-//                back to the correct VoiceCtx
+//     back to the correct VoiceCtx
 //   - tracks:    candidate tracks shown in the embed, in display order
 //   - mode:      hand-off mode (enqueue vs insert-next)
 //   - createdAt: wall clock at construction; expiry derived from createdAt+TTL

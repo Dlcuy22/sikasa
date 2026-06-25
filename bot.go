@@ -70,10 +70,10 @@ const (
 //   - cmds:     registered command builders, flushed to Discord on Start()
 //   - kws:      registered keyword matchers, evaluated on every MessageCreate
 //   - prefix:   global text prefix that triggers PrefixBuilder dispatch;
-//               empty string disables prefix routing entirely
+//     empty string disables prefix routing entirely
 //   - prefixes: registered prefix command builders
 //   - prefixIndex: lookup table built at Start(); keys include both names
-//                  and aliases (lower-cased)
+//     and aliases (lower-cased)
 //   - client:   the live disgo client; nil until Start() succeeds
 //   - voices:   per-guild voice contexts, keyed by guild ID
 //   - slog:     structured logger handed to disgo (gateway, voice, REST)
@@ -222,10 +222,10 @@ WithVerbose enables structured logging on stderr for both the sikasa
 wrapper and the underlying disgo client. By default, it uses debug-level
 logging; this can be customized by passing a specific slog.Level.
 
-    params:
-          levels: optional slog.Level to override the default LevelDebug
-    returns:
-          *Bot:   receiver, for chaining
+	params:
+	      levels: optional slog.Level to override the default LevelDebug
+	returns:
+	      *Bot:   receiver, for chaining
 */
 func (b *Bot) WithVerbose(levels ...slog.Level) *Bot {
 	lvl := slog.LevelDebug
@@ -239,11 +239,11 @@ func (b *Bot) WithVerbose(levels ...slog.Level) *Bot {
 /*
 WithCache configures the sliding window audio prefetching cacher.
 
-    params:
-          dir:      cache directory path (e.g. "sikasa-data/audiocache")
-          maxAhead: number of tracks to prefetch ahead of the current track
-    returns:
-          *Bot:     receiver, for chaining
+	params:
+	      dir:      cache directory path (e.g. "sikasa-data/audiocache")
+	      maxAhead: number of tracks to prefetch ahead of the current track
+	returns:
+	      *Bot:     receiver, for chaining
 */
 func (b *Bot) WithCache(dir string, maxAhead int) *Bot {
 	b.cacheDir = dir
@@ -255,8 +255,8 @@ func (b *Bot) WithCache(dir string, maxAhead int) *Bot {
 /*
 WithoutCache disables the audio prefetching cacher entirely.
 
-    returns:
-          *Bot: receiver, for chaining
+	returns:
+	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithoutCache() *Bot {
 	b.cacheEnabled = false
@@ -266,10 +266,10 @@ func (b *Bot) WithoutCache() *Bot {
 /*
 WithMusicLogInterval tunes the logging interval for music process memory usage reports.
 
-    params:
-          d: reporting interval (e.g. 5s)
-    returns:
-          *Bot: receiver, for chaining
+	params:
+	      d: reporting interval (e.g. 5s)
+	returns:
+	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithMusicLogInterval(d time.Duration) *Bot {
 	b.musicLogInterval = d
@@ -280,10 +280,10 @@ func (b *Bot) WithMusicLogInterval(d time.Duration) *Bot {
 WithRemuxMode configures the default remuxing strategy for new voice connections.
 Accepted values are "ffmpeg" or "native".
 
-    params:
-          mode: the remuxing mode ("ffmpeg" or "native")
-    returns:
-          *Bot: receiver, for chaining
+	params:
+	      mode: the remuxing mode ("ffmpeg" or "native")
+	returns:
+	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithRemuxMode(mode string) *Bot {
 	switch RemuxMode(mode) {
@@ -298,13 +298,12 @@ func (b *Bot) WithRemuxMode(mode string) *Bot {
 /*
 RemuxMode returns the configured default remuxing mode for the bot.
 
-    returns:
-          string: the configured remuxing mode ("ffmpeg" or "native")
+	returns:
+	      string: the configured remuxing mode ("ffmpeg" or "native")
 */
 func (b *Bot) RemuxMode() string {
 	return string(b.remuxMode)
 }
-
 
 /*
 Disgo returns the underlying *bot.Client as an escape hatch for features the
@@ -539,11 +538,11 @@ type ColorHandler struct {
 /*
 NewColorHandler constructs a ColorHandler that writes to w at the given level.
 
-    params:
-          w: the writer to write output to (e.g. os.Stderr)
-          lvl: the minimum logging level to display
-    returns:
-          *ColorHandler: initialized handler
+	params:
+	      w: the writer to write output to (e.g. os.Stderr)
+	      lvl: the minimum logging level to display
+	returns:
+	      *ColorHandler: initialized handler
 */
 func NewColorHandler(w io.Writer, lvl slog.Level) *ColorHandler {
 	return &ColorHandler{
@@ -555,11 +554,11 @@ func NewColorHandler(w io.Writer, lvl slog.Level) *ColorHandler {
 /*
 Enabled reports whether the handler handles records at the given level.
 
-    params:
-          ctx: execution context
-          lvl: log level to check
-    returns:
-          bool: true if the level is enabled
+	params:
+	      ctx: execution context
+	      lvl: log level to check
+	returns:
+	      bool: true if the level is enabled
 */
 func (h *ColorHandler) Enabled(ctx context.Context, lvl slog.Level) bool {
 	return lvl >= h.level
@@ -568,11 +567,11 @@ func (h *ColorHandler) Enabled(ctx context.Context, lvl slog.Level) bool {
 /*
 Handle processes the log record and prints it to the destination writer with ANSI colors.
 
-    params:
-          ctx: execution context
-          r:   the log record containing message, level, attributes, and source
-    returns:
-          error: any writer write error
+	params:
+	      ctx: execution context
+	      r:   the log record containing message, level, attributes, and source
+	returns:
+	      error: any writer write error
 */
 func (h *ColorHandler) Handle(ctx context.Context, r slog.Record) error {
 	h.mu.Lock()
@@ -631,10 +630,10 @@ func (h *ColorHandler) Handle(ctx context.Context, r slog.Record) error {
 /*
 WithAttrs returns a new handler that contains the given attributes.
 
-    params:
-          attrs: additional log attributes
-    returns:
-          slog.Handler: new handler with attributes merged
+	params:
+	      attrs: additional log attributes
+	returns:
+	      slog.Handler: new handler with attributes merged
 */
 func (h *ColorHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	newH := &ColorHandler{
@@ -649,10 +648,10 @@ func (h *ColorHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 /*
 WithGroup returns a new handler that scopes output to a given group.
 
-    params:
-          name: group name
-    returns:
-          slog.Handler: new handler with group set
+	params:
+	      name: group name
+	returns:
+	      slog.Handler: new handler with group set
 */
 func (h *ColorHandler) WithGroup(name string) slog.Handler {
 	if name == "" {

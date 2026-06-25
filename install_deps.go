@@ -14,7 +14,6 @@
 //   - os/exec: to execute installation commands
 //   - regexp: to parse OS release information
 //   - runtime: to detect host OS
-//
 package sikasa
 
 import (
@@ -34,8 +33,8 @@ import (
 /*
 getSikasaBinDir returns the target path to store downloaded binary tools.
 
-    returns:
-          string: path to local bin folder
+	returns:
+	      string: path to local bin folder
 */
 func getSikasaBinDir() string {
 	home, err := os.UserHomeDir()
@@ -49,10 +48,10 @@ func getSikasaBinDir() string {
 ResolveBinaryPath resolves the absolute path of a binary. It first checks the
 system PATH, and if not found, checks the local Sikasa bin directory.
 
-    params:
-          name: binary name (e.g. "yt-dlp", "ffmpeg", "bun")
-    returns:
-          string: resolved path or name if not found
+	params:
+	      name: binary name (e.g. "yt-dlp", "ffmpeg", "bun")
+	returns:
+	      string: resolved path or name if not found
 */
 func ResolveBinaryPath(name string) string {
 	if runtime.GOOS == "windows" && !strings.HasSuffix(name, ".exe") {
@@ -80,8 +79,8 @@ install the required FFmpeg shared libraries (libavformat/libavutil) using
 the system package manager if they are not already installed, as well as
 downloading yt-dlp and bun binaries if they are missing.
 
-    returns:
-          error: if installation or download fails
+	returns:
+	      error: if installation or download fails
 */
 func ensureDependencies() error {
 	log.Printf("sikasa: checking required dependencies (FFmpeg shared libraries, yt-dlp, bun)...")
@@ -125,11 +124,11 @@ func ensureDependencies() error {
 /*
 downloadFile helper downloads a URL directly to the target file path.
 
-    params:
-          url:      download endpoint
-          destPath: local destination path
-    returns:
-          error:    on download or file write failure
+	params:
+	      url:      download endpoint
+	      destPath: local destination path
+	returns:
+	      error:    on download or file write failure
 */
 func downloadFile(url, destPath string) error {
 	resp, err := http.Get(url)
@@ -152,12 +151,12 @@ func downloadFile(url, destPath string) error {
 /*
 extractFileFromZip extracts a single target file from a zip archive.
 
-    params:
-          zipPath:    source zip archive path
-          targetName: name of the file inside zip to extract
-          destPath:   local path to save extracted file
-    returns:
-          error:      on extraction failure
+	params:
+	      zipPath:    source zip archive path
+	      targetName: name of the file inside zip to extract
+	      destPath:   local path to save extracted file
+	returns:
+	      error:      on extraction failure
 */
 func extractFileFromZip(zipPath, targetName, destPath string) error {
 	r, err := zip.OpenReader(zipPath)
@@ -190,8 +189,8 @@ func extractFileFromZip(zipPath, targetName, destPath string) error {
 /*
 downloadYtDlp downloads the correct yt-dlp binary for the current OS/architecture.
 
-    returns:
-          error: on download failure
+	returns:
+	      error: on download failure
 */
 func downloadYtDlp() error {
 	var url string
@@ -225,8 +224,8 @@ func downloadYtDlp() error {
 /*
 downloadBun downloads and extracts the bun CLI for the current OS/architecture.
 
-    returns:
-          error: on download or extraction failure
+	returns:
+	      error: on download or extraction failure
 */
 func downloadBun() error {
 	var url string
@@ -278,8 +277,8 @@ installSystemFFmpeg detects the running operating system and attempts to
 install the required FFmpeg shared libraries (libavformat/libavutil) using
 the system package manager.
 
-    returns:
-          error: if installation command fails
+	returns:
+	      error: if installation command fails
 */
 func installSystemFFmpeg() error {
 	switch runtime.GOOS {
@@ -297,8 +296,8 @@ func installSystemFFmpeg() error {
 /*
 installLinuxDeps parses /etc/os-release and installs development packages.
 
-    returns:
-          error: if command execution fails
+	returns:
+	      error: if command execution fails
 */
 func installLinuxDeps() error {
 	f, err := os.ReadFile("/etc/os-release")
@@ -351,8 +350,8 @@ func installLinuxDeps() error {
 /*
 installWindowsDeps uses winget to install FFmpeg shared libraries.
 
-    returns:
-          error: if winget execution fails
+	returns:
+	      error: if winget execution fails
 */
 func installWindowsDeps() error {
 	log.Printf("sikasa: running winget to install Gyan.FFmpeg.Shared...")
@@ -375,8 +374,8 @@ func installWindowsDeps() error {
 /*
 installMacDeps uses Homebrew to install FFmpeg shared libraries.
 
-    returns:
-          error: if brew execution fails
+	returns:
+	      error: if brew execution fails
 */
 func installMacDeps() error {
 	log.Printf("sikasa: running brew to install ffmpeg...")

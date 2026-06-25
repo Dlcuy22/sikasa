@@ -7,7 +7,6 @@
 //
 // Dependencies:
 //   - testing: standard Go testing framework
-//
 package sikasa
 
 import (
@@ -21,8 +20,8 @@ import (
 /*
 TestCache_Configuration verifies the default caching config and fluent setters.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestCache_Configuration(t *testing.T) {
 	bot, err := New("dummy_token")
@@ -63,8 +62,8 @@ func TestCache_Configuration(t *testing.T) {
 /*
 TestCache_PathHashing verifies MD5 hashing and output path generation.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestCache_PathHashing(t *testing.T) {
 	bot, err := New("dummy_token")
@@ -88,8 +87,8 @@ func TestCache_PathHashing(t *testing.T) {
 TestCache_SlidingWindow verifies that the prefetch sliding window works correctly
 under queue advances, keeping in-window files and evicting out-of-window files.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestCache_SlidingWindow(t *testing.T) {
 	bot, err := New("dummy_token")
@@ -174,8 +173,8 @@ func TestCache_SlidingWindow(t *testing.T) {
 TestCache_Shuffle verifies that shuffling the queue correctly recalibrates the sliding window
 caching priorities and evicts now out-of-window files.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestCache_Shuffle(t *testing.T) {
 	bot, err := New("dummy_token")
@@ -242,8 +241,8 @@ func TestCache_Shuffle(t *testing.T) {
 /*
 TestBot_RemuxModeConfiguration verifies configuring RemuxMode on Bot and VoiceCtx.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestBot_RemuxModeConfiguration(t *testing.T) {
 	bot, err := New("dummy_token")
@@ -293,5 +292,3 @@ func TestBot_RemuxModeConfiguration(t *testing.T) {
 		t.Errorf("expected VoiceCtx invalid mode to fallback to %q, got %q", RemuxFFmpeg, vctx.remuxMode)
 	}
 }
-
-

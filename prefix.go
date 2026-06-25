@@ -55,12 +55,12 @@ type prefixArg struct {
 //
 // Key Fields:
 //   - name, desc:        user-visible name and description (description currently
-//                        unused but reserved for a future help generator)
+//     unused but reserved for a future help generator)
 //   - aliases:           extra names that resolve to this builder
 //   - args:              option list, parsed in registration order
 //   - handler:           invoked when a message matches the command
 //   - requireSameVoice:  when true, dispatch rejects callers who are not in
-//                        the same voice channel as the bot for the guild
+//     the same voice channel as the bot for the guild
 //
 // Note: Builders are not thread-safe; finish configuration before Start().
 type PrefixBuilder struct {

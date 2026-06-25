@@ -5,8 +5,8 @@
 //
 // Key Components:
 //   - Bot.checkSameVoice():  inspects the cached voice states for the guild
-//                             and returns ErrNotSameChannel when the invoker
-//                             is not co-located with the bot
+//     and returns ErrNotSameChannel when the invoker
+//     is not co-located with the bot
 //
 // Note: When the bot is not connected to any voice channel in the guild the
 // check passes. This lets initial-join commands like "play" still work; the

@@ -8,7 +8,6 @@
 //
 // Dependencies:
 //   - testing: standard Go testing framework
-//
 package sikasa
 
 import (
@@ -29,16 +28,16 @@ type dummyReadCloser struct {
 /*
 Close implements the Close method on the dummy reader.
 
-    returns:
-          error: nil error
+	returns:
+	      error: nil error
 */
 func (dummyReadCloser) Close() error { return nil }
 
 /*
 TestStreamProvider_PauseResume checks that paused providers yield silence.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestStreamProvider_PauseResume(t *testing.T) {
 	dummyData := []byte("OggS...")
@@ -72,8 +71,8 @@ func TestStreamProvider_PauseResume(t *testing.T) {
 /*
 TestStreamProvider_LogSpawnedMemory checks that memory check handles nil proc.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestStreamProvider_LogSpawnedMemory(t *testing.T) {
 	prov := &streamProvider{proc: nil}

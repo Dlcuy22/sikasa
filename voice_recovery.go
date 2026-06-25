@@ -6,7 +6,7 @@
 //
 // Key Components:
 //   - recoveryHandler:  slog.Handler that wraps another handler, sniffs error
-//                       records, and dispatches recoveries
+//     records, and dispatches recoveries
 //   - installRecovery:  installs the wrapper around the bot's logger
 //
 // Note: Reconnect is rate-limited per guild (one attempt every 30s) so a
@@ -45,6 +45,8 @@ const recoveryDebounce = 30 * time.Second
 var recoveryTriggers = []string{
 	"no active epoch",
 	"failed to encrypt packet",
+	"shard is not ready",
+	"session is no longer valid",
 }
 
 func newRecoveryHandler(inner slog.Handler, b *Bot) *recoveryHandler {

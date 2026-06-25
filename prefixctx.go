@@ -21,10 +21,10 @@ package sikasa
 //   - MsgCtx: embedded; provides Bot(), Event(), Reply(), Send(), etc.
 //   - name:   resolved canonical command name (Aliases are normalized away)
 //   - args:   parsed builder args, keyed by the names declared in StringArg
-//             / IntArg / BoolArg
+//     / IntArg / BoolArg
 //   - raw:    every whitespace-separated token after the command name
 //   - rest:   the entire message tail after the command name, with original
-//             whitespace preserved
+//     whitespace preserved
 type PrefixCtx struct {
 	*MsgCtx
 	name string

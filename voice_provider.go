@@ -39,8 +39,8 @@ import (
 //   - done:   when true, ProvideOpusFrame returns io.EOF (streaming finished)
 //   - closed: when true, the FFmpeg subprocess has already been killed/reaped
 //   - onDone: optional callback fired exactly once on natural EOF; suppressed
-//             when Close() is what ended the stream (so swap-driven teardowns
-//             do not chain into Next)
+//     when Close() is what ended the stream (so swap-driven teardowns
+//     do not chain into Next)
 //
 // Note: done and closed are separate. Natural EOF sets done=true so the audio
 // sender stops pulling frames, and also triggers cleanup so FFmpeg does not

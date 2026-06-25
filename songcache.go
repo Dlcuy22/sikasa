@@ -17,7 +17,6 @@
 //   - os: Creating directories and managing files.
 //   - os/exec: Running yt-dlp and ffmpeg.
 //   - path/filepath: Building cross-platform paths.
-//
 package sikasa
 
 import (
@@ -34,10 +33,10 @@ import (
 /*
 getCachePath computes the target Ogg-Opus cache file path for a given URL.
 
-    params:
-          url: the canonical YouTube URL
-    returns:
-          string: the absolute path to the cached Ogg file
+	params:
+	      url: the canonical YouTube URL
+	returns:
+	      string: the absolute path to the cached Ogg file
 */
 func (b *Bot) getCachePath(url string) string {
 	hash := md5.Sum([]byte(url))
@@ -49,10 +48,10 @@ func (b *Bot) getCachePath(url string) string {
 prefetchTrack downloads a YouTube audio stream, remuxes it to an Ogg file,
 and saves it in the cache directory. Automatically utilizes Bun if available.
 
-    params:
-          parentCtx: parent context for lifecycle cancellation
-          url:       the canonical YouTube URL to download
-          cachePath: the target destination path of the Ogg file
+	params:
+	      parentCtx: parent context for lifecycle cancellation
+	      url:       the canonical YouTube URL to download
+	      cachePath: the target destination path of the Ogg file
 */
 func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath string) {
 	b.cacheMu.Lock()

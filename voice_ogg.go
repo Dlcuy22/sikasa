@@ -24,9 +24,9 @@ import (
 
 // oggPageParser walks an Ogg-Opus stream and yields raw Opus packets.
 type oggPageParser struct {
-	r            io.Reader
-	pendingPkts  [][]byte
-	headerSeen   int
+	r           io.Reader
+	pendingPkts [][]byte
+	headerSeen  int
 }
 
 // newOggParser wraps an io.Reader as an Ogg parser.

@@ -32,9 +32,9 @@ import (
 //   - data:     the button interaction data
 //   - vars:     path variables extracted from the customID pattern
 //   - deferred: tracks whether the handler has called DeferUpdate, so
-//               subsequent Update/UpdateEmbed/ClearComponents go through the
-//               followup-style UpdateInteractionResponse instead of trying to
-//               respond a second time
+//     subsequent Update/UpdateEmbed/ClearComponents go through the
+//     followup-style UpdateInteractionResponse instead of trying to
+//     respond a second time
 //
 // Note: ButtonCtx values are constructed by the dispatcher; do not build
 // them yourself. The embedded *handler.ComponentEvent is exposed as an

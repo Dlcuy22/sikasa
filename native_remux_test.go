@@ -8,7 +8,6 @@
 //
 // Dependencies:
 //   - testing: standard Go testing framework
-//
 package sikasa
 
 import (
@@ -23,8 +22,8 @@ import (
 TestNativeRemux_Init verifies that the FFmpeg libraries can be successfully
 initialized and all dynamic C function pointers can be bound.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestNativeRemux_Init(t *testing.T) {
 	err := initNativeRemuxer()
@@ -57,8 +56,8 @@ func TestNativeRemux_Init(t *testing.T) {
 TestNativeRemux_EmptyReader verifies that an empty input stream fails gracefully
 at avformat_open_input instead of crashing or causing segmentation faults.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestNativeRemux_EmptyReader(t *testing.T) {
 	if err := initNativeRemuxer(); err != nil {
@@ -76,8 +75,8 @@ func TestNativeRemux_EmptyReader(t *testing.T) {
 TestNativeRemux_ValidWebm verifies that remuxing a valid WebM/Opus file to Ogg/Opus
 succeeds without error and without crashing.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestNativeRemux_ValidWebm(t *testing.T) {
 	if err := initNativeRemuxer(); err != nil {
@@ -109,8 +108,8 @@ func TestNativeRemux_ValidWebm(t *testing.T) {
 TestNativeRemux_ToWriter verifies that RemuxStreamToWriter successfully remuxes
 a valid WebM/Opus stream directly to a writer.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestNativeRemux_ToWriter(t *testing.T) {
 	if err := initNativeRemuxer(); err != nil {

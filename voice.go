@@ -5,7 +5,7 @@
 // Key Components:
 //   - VoiceManager: factory accessed via bot.Voice(); holds per-guild contexts
 //   - VoiceCtx:     handle returned by Join(); supports PlayFile, PlayYouTube,
-//                   Pause, Resume, Stop, Leave
+//     Pause, Resume, Stop, Leave
 //   - PlaybackState: enum for the current state machine
 //
 // Dependencies:
@@ -164,7 +164,7 @@ func (m *VoiceManager) Get(guildID string) *VoiceCtx {
 //   - source:             human-readable description of what is currently loaded
 //   - queue:              per-guild track list and cursor; auto-advances on EOF
 //   - announceChannelID:  optional channel where auto-advance announcements go;
-//                         zero means announcements are disabled
+//     zero means announcements are disabled
 //
 // Note: Methods are safe to call concurrently. The provider, source, queue,
 // and announceChannelID fields are guarded by the mutex; state is atomic so
@@ -580,7 +580,6 @@ func (v *VoiceCtx) Shuffle() error {
 	return nil
 }
 
-
 /*
 Pause stops sending audio frames. The FFmpeg process and parser stay alive,
 so Resume() picks up exactly where playback left off.
@@ -844,4 +843,3 @@ func (v *VoiceCtx) announce(channelID snowflake.ID, text string) {
 		v.log.Debug("voice: announce failed", "channel_id", channelID.String(), "err", err)
 	}
 }
-

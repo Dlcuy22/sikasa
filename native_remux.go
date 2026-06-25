@@ -10,7 +10,6 @@
 //
 // Dependencies:
 //   - github.com/ebitengine/purego: dynamically registers C functions without Cgo
-//
 package sikasa
 
 import (
@@ -38,6 +37,7 @@ var (
 
 	// libavutil functions
 	av_malloc       func(size uintptr) uintptr
+	av_free         func(ptr uintptr)
 	av_packet_alloc func() uintptr
 	av_packet_free  func(pkt *uintptr)
 	av_packet_unref func(pkt uintptr)
@@ -62,22 +62,26 @@ var (
 
 	// Custom I/O registry for read callbacks
 	readersMu    sync.Mutex
-	readers      = make(map[uintptr]io.Reader)
+	readers              = make(map[uintptr]io.Reader)
 	nextReaderID uintptr = 1
 
 	// Custom I/O registry for write callbacks
 	writersMu    sync.Mutex
-	writers      = make(map[uintptr]io.Writer)
+	writers              = make(map[uintptr]io.Writer)
 	nextWriterID uintptr = 1
+
+	// Global callback pointers for FFmpeg custom I/O
+	globalReadCallback  uintptr
+	globalWriteCallback uintptr
 )
 
 /*
 registerReader registers a reader and returns a unique ID.
 
-    params:
-          r: Go reader to register
-    returns:
-          uintptr: unique ID to map with opaque C parameter
+	params:
+	      r: Go reader to register
+	returns:
+	      uintptr: unique ID to map with opaque C parameter
 */
 func registerReader(r io.Reader) uintptr {
 	readersMu.Lock()
@@ -91,8 +95,8 @@ func registerReader(r io.Reader) uintptr {
 /*
 unregisterReader unregisters a reader by its ID.
 
-    params:
-          id: registry key
+	params:
+	      id: registry key
 */
 func unregisterReader(id uintptr) {
 	readersMu.Lock()
@@ -103,10 +107,10 @@ func unregisterReader(id uintptr) {
 /*
 getReader retrieves a registered reader by ID.
 
-    params:
-          id: registry key
-    returns:
-          io.Reader: the mapped reader
+	params:
+	      id: registry key
+	returns:
+	      io.Reader: the mapped reader
 */
 func getReader(id uintptr) io.Reader {
 	readersMu.Lock()
@@ -117,8 +121,8 @@ func getReader(id uintptr) io.Reader {
 /*
 getAvutilNames returns candidate library names for libavutil based on OS.
 
-    returns:
-          []string: slice of naming candidates
+	returns:
+	      []string: slice of naming candidates
 */
 func getAvutilNames() []string {
 	switch runtime.GOOS {
@@ -152,8 +156,8 @@ func getAvutilNames() []string {
 /*
 getAvcodecNames returns candidate library names for libavcodec based on OS.
 
-    returns:
-          []string: slice of naming candidates
+	returns:
+	      []string: slice of naming candidates
 */
 func getAvcodecNames() []string {
 	switch runtime.GOOS {
@@ -186,8 +190,8 @@ func getAvcodecNames() []string {
 /*
 getAvformatNames returns candidate library names for libavformat based on OS.
 
-    returns:
-          []string: slice of naming candidates
+	returns:
+	      []string: slice of naming candidates
 */
 func getAvformatNames() []string {
 	switch runtime.GOOS {
@@ -220,11 +224,11 @@ func getAvformatNames() []string {
 /*
 loadLibHelper attempts to load a library from a list of candidate names.
 
-    params:
-          names: slice of name variations
-    returns:
-          uintptr: library handle
-          error: if none of the candidates could be loaded
+	params:
+	      names: slice of name variations
+	returns:
+	      uintptr: library handle
+	      error: if none of the candidates could be loaded
 */
 func loadLibHelper(names []string) (uintptr, error) {
 	var lastErr error
@@ -241,8 +245,8 @@ func loadLibHelper(names []string) (uintptr, error) {
 /*
 loadFFmpegLibraries tries to load util, codec, and format shared libraries.
 
-    returns:
-          error: if loading fails for any of the libraries
+	returns:
+	      error: if loading fails for any of the libraries
 */
 func loadFFmpegLibraries() error {
 	var err error
@@ -263,6 +267,7 @@ func loadFFmpegLibraries() error {
 
 	// Register libavutil symbols
 	purego.RegisterLibFunc(&av_malloc, libavutilHandle, "av_malloc")
+	purego.RegisterLibFunc(&av_free, libavutilHandle, "av_free")
 
 	// Register libavcodec symbols
 	purego.RegisterLibFunc(&av_packet_alloc, libavcodecHandle, "av_packet_alloc")
@@ -294,14 +299,15 @@ func loadFFmpegLibraries() error {
 initNativeRemuxer initializes libraries and triggers automated dependency
 installation if libraries are missing.
 
-    returns:
-          error: if initialization fails
+	returns:
+	      error: if initialization fails
 */
 func initNativeRemuxer() error {
 	remuxInitOnce.Do(func() {
 		// First attempt
 		err := loadFFmpegLibraries()
 		if err == nil {
+			setupGlobalCallbacks()
 			return
 		}
 
@@ -317,15 +323,54 @@ func initNativeRemuxer() error {
 			remuxInitErr = fmt.Errorf("dependencies installed but still failed to load FFmpeg libraries: %w", err)
 			return
 		}
+		setupGlobalCallbacks()
 	})
 	return remuxInitErr
 }
 
 /*
+setupGlobalCallbacks initializes the reusable, global C callbacks for custom I/O.
+*/
+func setupGlobalCallbacks() {
+	globalReadCallback = purego.NewCallback(func(opaque uintptr, buf uintptr, bufSize int32) int32 {
+		r := getReader(opaque)
+		if r == nil {
+			return -5 // EIO
+		}
+		goBuf := unsafe.Slice((*byte)(unsafe.Pointer(buf)), bufSize)
+		for {
+			n, err := r.Read(goBuf)
+			if n > 0 {
+				return int32(n)
+			}
+			if err != nil {
+				if err == io.EOF {
+					return -541478725 // AVERROR_EOF
+				}
+				return -5 // EIO
+			}
+		}
+	})
+
+	globalWriteCallback = purego.NewCallback(func(opaque uintptr, buf uintptr, bufSize int32) int32 {
+		w := getWriter(opaque)
+		if w == nil {
+			return -5 // EIO
+		}
+		goBuf := unsafe.Slice((*byte)(unsafe.Pointer(buf)), bufSize)
+		n, _ := w.Write(goBuf)
+		if n > 0 {
+			return int32(n)
+		}
+		return -5 // EIO
+	})
+}
+
+/*
 getCodecParOffset returns the offset of codecpar within AVStream based on FFmpeg version.
 
-    returns:
-          uintptr: offset of codecpar
+	returns:
+	      uintptr: offset of codecpar
 */
 func getCodecParOffset() uintptr {
 	if avformat_version == nil {
@@ -346,8 +391,8 @@ func getCodecParOffset() uintptr {
 /*
 getPacketDurationOffset returns the offset of duration within AVPacket based on FFmpeg version.
 
-    returns:
-          uintptr: offset of duration
+	returns:
+	      uintptr: offset of duration
 */
 func getPacketDurationOffset() uintptr {
 	if avformat_version == nil {
@@ -364,11 +409,11 @@ func getPacketDurationOffset() uintptr {
 /*
 getStreamCodecID reads the codec_id from AVCodecParameters.
 
-    params:
-          streamPtr: pointer to AVStream
-          codecParOffset: offset of codecpar in AVStream
-    returns:
-          int32: codec ID value
+	params:
+	      streamPtr: pointer to AVStream
+	      codecParOffset: offset of codecpar in AVStream
+	returns:
+	      int32: codec ID value
 */
 func getStreamCodecID(streamPtr uintptr, codecParOffset uintptr) int32 {
 	codecParPtr := *(*uintptr)(unsafe.Pointer(streamPtr + codecParOffset))
@@ -381,11 +426,11 @@ func getStreamCodecID(streamPtr uintptr, codecParOffset uintptr) int32 {
 /*
 getStreamCodecType reads the codec_type from AVCodecParameters.
 
-    params:
-          streamPtr: pointer to AVStream
-          codecParOffset: offset of codecpar in AVStream
-    returns:
-          int32: codec type value
+	params:
+	      streamPtr: pointer to AVStream
+	      codecParOffset: offset of codecpar in AVStream
+	returns:
+	      int32: codec type value
 */
 func getStreamCodecType(streamPtr uintptr, codecParOffset uintptr) int32 {
 	codecParPtr := *(*uintptr)(unsafe.Pointer(streamPtr + codecParOffset))
@@ -398,10 +443,10 @@ func getStreamCodecType(streamPtr uintptr, codecParOffset uintptr) int32 {
 /*
 getStreamTimeBase reads the time_base AVRational struct from AVStream.
 
-    params:
-          streamPtr: pointer to AVStream
-    returns:
-          AVRational: read value
+	params:
+	      streamPtr: pointer to AVStream
+	returns:
+	      AVRational: read value
 */
 func getStreamTimeBase(streamPtr uintptr) AVRational {
 	var offset uintptr = 32 // default to FFmpeg 7.x
@@ -419,12 +464,12 @@ func getStreamTimeBase(streamPtr uintptr) AVRational {
 /*
 avRescale performs basic scaling logic.
 
-    params:
-          a: value to scale
-          b: numerator
-          c: denominator
-    returns:
-          int64: rescaled value
+	params:
+	      a: value to scale
+	      b: numerator
+	      c: denominator
+	returns:
+	      int64: rescaled value
 */
 func avRescale(a, b, c int64) int64 {
 	if c == 0 {
@@ -436,12 +481,12 @@ func avRescale(a, b, c int64) int64 {
 /*
 avRescaleQ rescales raw timestamps using source/destination timebases.
 
-    params:
-          a: raw value
-          bq: source AVRational
-          cq: target AVRational
-    returns:
-          int64: rescaled timestamp value
+	params:
+	      a: raw value
+	      bq: source AVRational
+	      cq: target AVRational
+	returns:
+	      int64: rescaled timestamp value
 */
 func avRescaleQ(a int64, bq, cq AVRational) int64 {
 	return avRescale(a, int64(bq.Num)*int64(cq.Den), int64(bq.Den)*int64(cq.Num))
@@ -451,16 +496,18 @@ func avRescaleQ(a int64, bq, cq AVRational) int64 {
 RemuxStream reads input WebM/Opus data from a Go reader and writes Ogg/Opus container
 to a local file path natively using FFmpeg shared libraries.
 
-    params:
-          reader:  source stream reader
-          outPath: destination path for Ogg file
-    returns:
-          error:   on initialization or remuxing failure
+	params:
+	      reader:  source stream reader
+	      outPath: destination path for Ogg file
+	returns:
+	      error:   on initialization or remuxing failure
 */
 func RemuxStream(reader io.Reader, outPath string) error {
 	if err := initNativeRemuxer(); err != nil {
 		return fmt.Errorf("native remuxer not available: %w", err)
 	}
+
+	releasedByFFmpeg := false
 
 	// 1. Setup custom input I/O context
 	const ioBufSize = 32768
@@ -468,30 +515,24 @@ func RemuxStream(reader io.Reader, outPath string) error {
 	if avioBuffer == 0 {
 		return fmt.Errorf("failed to allocate avio buffer")
 	}
+	defer func() {
+		if !releasedByFFmpeg {
+			av_free(avioBuffer)
+		}
+	}()
 
 	readerID := registerReader(reader)
 	defer unregisterReader(readerID)
 
-	readCallback := purego.NewCallback(func(opaque uintptr, buf uintptr, bufSize int32) int32 {
-		r := getReader(opaque)
-		if r == nil {
-			return -1 // EIO
-		}
-		goBuf := unsafe.Slice((*byte)(unsafe.Pointer(buf)), bufSize)
-		n, err := r.Read(goBuf)
-		if n > 0 {
-			return int32(n)
-		}
-		if err == io.EOF {
-			return -541478725 // AVERROR_EOF
-		}
-		return -5 // EIO
-	})
-
-	pb := avio_alloc_context(avioBuffer, ioBufSize, 0, readerID, readCallback, 0, 0)
+	pb := avio_alloc_context(avioBuffer, ioBufSize, 0, readerID, globalReadCallback, 0, 0)
 	if pb == 0 {
 		return fmt.Errorf("failed to allocate avio context")
 	}
+	defer func() {
+		if !releasedByFFmpeg {
+			av_free(pb)
+		}
+	}()
 
 	// 2. Open input format context
 	inFormatCtx := avformat_alloc_context()
@@ -501,6 +542,7 @@ func RemuxStream(reader io.Reader, outPath string) error {
 	*(*uintptr)(unsafe.Pointer(inFormatCtx + 32)) = pb // Set pb field at offset 32
 
 	inFormatCtxPtr := inFormatCtx
+	releasedByFFmpeg = true
 	if ret := avformat_open_input(&inFormatCtxPtr, nil, 0, nil); ret < 0 {
 		return fmt.Errorf("avformat_open_input failed: %d", ret)
 	}
@@ -626,17 +668,16 @@ func RemuxStream(reader io.Reader, outPath string) error {
 	avformat_free_context(outFormatCtx)
 	avformat_close_input(&inFormatCtxPtr)
 
-	runtime.KeepAlive(readCallback)
 	return nil
 }
 
 /*
 registerWriter registers a writer and returns a unique ID.
 
-    params:
-          w: Go writer to register
-    returns:
-          uintptr: unique ID to map with opaque C parameter
+	params:
+	      w: Go writer to register
+	returns:
+	      uintptr: unique ID to map with opaque C parameter
 */
 func registerWriter(w io.Writer) uintptr {
 	writersMu.Lock()
@@ -650,8 +691,8 @@ func registerWriter(w io.Writer) uintptr {
 /*
 unregisterWriter unregisters a writer by its ID.
 
-    params:
-          id: registry key
+	params:
+	      id: registry key
 */
 func unregisterWriter(id uintptr) {
 	writersMu.Lock()
@@ -662,10 +703,10 @@ func unregisterWriter(id uintptr) {
 /*
 getWriter retrieves a registered writer by ID.
 
-    params:
-          id: registry key
-    returns:
-          io.Writer: the mapped writer
+	params:
+	      id: registry key
+	returns:
+	      io.Writer: the mapped writer
 */
 func getWriter(id uintptr) io.Writer {
 	writersMu.Lock()
@@ -677,17 +718,18 @@ func getWriter(id uintptr) io.Writer {
 RemuxStreamToWriter reads WebM/Opus data from reader, remuxes it, and writes
 Ogg/Opus container data directly to writer using FFmpeg shared libraries.
 
-    params:
-          reader: source reader
-          writer: target writer
-    returns:
-          error:  on failure
+	params:
+	      reader: source reader
+	      writer: target writer
+	returns:
+	      error:  on failure
 */
 func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 	if err := initNativeRemuxer(); err != nil {
 		return fmt.Errorf("native remuxer not available: %w", err)
 	}
 
+	inReleasedByFFmpeg := false
 	const ioBufSize = 32768
 
 	// 1. Input pb setup
@@ -695,55 +737,40 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 	if inAvioBuffer == 0 {
 		return fmt.Errorf("failed to allocate input avio buffer")
 	}
+	defer func() {
+		if !inReleasedByFFmpeg {
+			av_free(inAvioBuffer)
+		}
+	}()
+
 	readerID := registerReader(reader)
 	defer unregisterReader(readerID)
 
-	readCallback := purego.NewCallback(func(opaque uintptr, buf uintptr, bufSize int32) int32 {
-		r := getReader(opaque)
-		if r == nil {
-			return -1
-		}
-		goBuf := unsafe.Slice((*byte)(unsafe.Pointer(buf)), bufSize)
-		n, err := r.Read(goBuf)
-		if n > 0 {
-			return int32(n)
-		}
-		if err == io.EOF {
-			return -541478725 // AVERROR_EOF
-		}
-		return -5 // EIO
-	})
-
-	inPb := avio_alloc_context(inAvioBuffer, ioBufSize, 0, readerID, readCallback, 0, 0)
+	inPb := avio_alloc_context(inAvioBuffer, ioBufSize, 0, readerID, globalReadCallback, 0, 0)
 	if inPb == 0 {
 		return fmt.Errorf("failed to allocate input avio context")
 	}
+	defer func() {
+		if !inReleasedByFFmpeg {
+			av_free(inPb)
+		}
+	}()
 
 	// 2. Output pb setup
 	outAvioBuffer := av_malloc(ioBufSize)
 	if outAvioBuffer == 0 {
 		return fmt.Errorf("failed to allocate output avio buffer")
 	}
+	defer av_free(outAvioBuffer)
+
 	writerID := registerWriter(writer)
 	defer unregisterWriter(writerID)
 
-	writeCallback := purego.NewCallback(func(opaque uintptr, buf uintptr, bufSize int32) int32 {
-		w := getWriter(opaque)
-		if w == nil {
-			return -1
-		}
-		goBuf := unsafe.Slice((*byte)(unsafe.Pointer(buf)), bufSize)
-		n, _ := w.Write(goBuf)
-		if n > 0 {
-			return int32(n)
-		}
-		return -5 // EIO
-	})
-
-	outPb := avio_alloc_context(outAvioBuffer, ioBufSize, 1, writerID, 0, writeCallback, 0)
+	outPb := avio_alloc_context(outAvioBuffer, ioBufSize, 1, writerID, 0, globalWriteCallback, 0)
 	if outPb == 0 {
 		return fmt.Errorf("failed to allocate output avio context")
 	}
+	defer av_free(outPb)
 
 	// 3. Open contexts
 	inFormatCtx := avformat_alloc_context()
@@ -753,6 +780,7 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 	*(*uintptr)(unsafe.Pointer(inFormatCtx + 32)) = inPb // Set pb field at offset 32
 
 	inFormatCtxPtr := inFormatCtx
+	inReleasedByFFmpeg = true
 	if ret := avformat_open_input(&inFormatCtxPtr, nil, 0, nil); ret < 0 {
 		return fmt.Errorf("avformat_open_input failed: %d", ret)
 	}
@@ -866,7 +894,5 @@ func RemuxStreamToWriter(reader io.Reader, writer io.Writer) error {
 	avformat_free_context(outFormatCtx)
 	avformat_close_input(&inFormatCtxPtr)
 
-	runtime.KeepAlive(readCallback)
-	runtime.KeepAlive(writeCallback)
 	return nil
 }

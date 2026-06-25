@@ -6,7 +6,6 @@
 //
 // Dependencies:
 //   - testing: standard Go testing framework
-//
 package sikasa
 
 import (
@@ -16,8 +15,8 @@ import (
 /*
 TestGroup_FluentAPI tests the Registration of a group and command routing.
 
-    params:
-          t: test runner context
+	params:
+	      t: test runner context
 */
 func TestGroup_FluentAPI(t *testing.T) {
 	bot, err := New("dummy_token")

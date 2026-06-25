@@ -27,8 +27,8 @@ import (
 //   - cmd:      the os/exec command, kept for Kill() and Wait()
 //   - stdout:   Ogg-Opus byte stream that the parser consumes
 //   - upstream: optional process feeding ffmpeg's stdin (e.g. yt-dlp). Tracked
-//               so Kill() can tear it down explicitly; SIGPIPE alone is not
-//               enough when the upstream is blocked on a network read
+//     so Kill() can tear it down explicitly; SIGPIPE alone is not
+//     enough when the upstream is blocked on a network read
 type ffmpegProcess struct {
 	cmd      *exec.Cmd
 	stdout   io.ReadCloser

@@ -15,7 +15,6 @@
 //   - os/exec:          Subprocess execution
 //   - path/filepath:    Cross-platform paths
 //   - github.com/dlcuy22/ytm-go: Natively resolves YouTube Music metadata
-//
 package sikasa
 
 import (
@@ -37,12 +36,12 @@ import (
 spawnYouTube fetches a YouTube URL via yt-dlp, hands the bytes to FFmpeg,
 and returns the FFmpeg process whose stdout is Ogg-Opus.
 
-    params:
-          url: any URL yt-dlp can resolve (YouTube, SoundCloud, etc.)
-          mode: the remuxing strategy to use (FFmpeg subprocess or Native purego)
-    returns:
-          *ffmpegProcess: kill this to terminate the whole pipeline
-          error:          if yt-dlp or ffmpeg cannot be spawned
+	params:
+	      url: any URL yt-dlp can resolve (YouTube, SoundCloud, etc.)
+	      mode: the remuxing strategy to use (FFmpeg subprocess or Native purego)
+	returns:
+	      *ffmpegProcess: kill this to terminate the whole pipeline
+	      error:          if yt-dlp or ffmpeg cannot be spawned
 */
 func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
 	// Look for a local Bun installation to speed up signature decryption.
@@ -126,11 +125,11 @@ func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
 probeYouTubeEntries expands any yt-dlp-resolvable URL into a list of Tracks.
 Single videos yield one entry; playlists yield N.
 
-    params:
-          url: any URL yt-dlp can resolve
-    returns:
-          []Track: one Track per playlist entry, in playlist order
-          error:   only set when yt-dlp itself errors
+	params:
+	      url: any URL yt-dlp can resolve
+	returns:
+	      []Track: one Track per playlist entry, in playlist order
+	      error:   only set when yt-dlp itself errors
 */
 func probeYouTubeEntries(url string) ([]Track, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -184,10 +183,10 @@ func probeYouTubeEntries(url string) ([]Track, error) {
 IsHTTPURL is a cheap heuristic that decides whether a user-supplied string
 should be treated as a URL or a search query.
 
-    params:
-          s: the raw user input
-    returns:
-          bool: true when s looks like an HTTP(S) URL
+	params:
+	      s: the raw user input
+	returns:
+	      bool: true when s looks like an HTTP(S) URL
 */
 func IsHTTPURL(s string) bool {
 	s = strings.TrimSpace(s)
@@ -198,12 +197,12 @@ func IsHTTPURL(s string) bool {
 SearchYouTube queries YouTube Music using the Go-native ytm-go library
 and returns the top-N results as Tracks. Bypasses yt-dlp for search.
 
-    params:
-          query: free-text search string
-          n:     number of results to return
-    returns:
-          []Track: candidate tracks in relevance order
-          error:   innerTube query error
+	params:
+	      query: free-text search string
+	      n:     number of results to return
+	returns:
+	      []Track: candidate tracks in relevance order
+	      error:   innerTube query error
 */
 func SearchYouTube(query string, n int) ([]Track, error) {
 	q := strings.TrimSpace(query)

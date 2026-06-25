@@ -19,7 +19,6 @@ import (
 	"time"
 )
 
-
 // TrackKind tags how a Track should be played back.
 type TrackKind int
 
@@ -35,9 +34,9 @@ const (
 // Key Fields:
 //   - Kind:   selects the spawn strategy when this track plays
 //   - Source: file path (TrackFile) or URL (TrackYouTube); used as the fallback
-//             label when Title is not populated
+//     label when Title is not populated
 //   - Title:  optional human-readable title; populated by metadata probes for
-//             TrackYouTube. Empty for TrackFile by default
+//     TrackYouTube. Empty for TrackFile by default
 //   - Author: optional uploader / channel / artist; populated alongside Title
 type Track struct {
 	Kind   TrackKind
@@ -219,4 +218,3 @@ func (q *queue) Shuffle() {
 		q.tracks[start+i], q.tracks[start+j] = q.tracks[start+j], q.tracks[start+i]
 	})
 }
-
