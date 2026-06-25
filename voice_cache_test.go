@@ -251,8 +251,8 @@ func TestBot_RemuxModeConfiguration(t *testing.T) {
 	}
 
 	// 1. Verify default
-	if bot.remuxMode != RemuxFFmpeg {
-		t.Errorf("expected default remuxMode to be %q, got %q", RemuxFFmpeg, bot.remuxMode)
+	if bot.remuxMode != RemuxNativeGo {
+		t.Errorf("expected default remuxMode to be %q, got %q", RemuxNativeGo, bot.remuxMode)
 	}
 
 	// 2. Test Bot.WithRemuxMode
@@ -262,11 +262,17 @@ func TestBot_RemuxModeConfiguration(t *testing.T) {
 	}
 
 	bot.WithRemuxMode("invalid-mode")
-	if bot.remuxMode != RemuxFFmpeg {
-		t.Errorf("expected invalid mode to fallback to %q, got %q", RemuxFFmpeg, bot.remuxMode)
+	if bot.remuxMode != RemuxNativeGo {
+		t.Errorf("expected invalid mode to fallback to %q, got %q", RemuxNativeGo, bot.remuxMode)
 	}
 
-	// 3. Test VoiceCtx inheritance and WithRemuxMode
+	// 3. Test native-go mode
+	bot.WithRemuxMode("native-go")
+	if bot.remuxMode != RemuxNativeGo {
+		t.Errorf("expected remuxMode to be %q after setting to native-go, got %q", RemuxNativeGo, bot.remuxMode)
+	}
+
+	// 4. Test VoiceCtx inheritance and WithRemuxMode
 	bot.WithRemuxMode("native")
 	vctx := &VoiceCtx{
 		bot:       bot,
@@ -288,7 +294,12 @@ func TestBot_RemuxModeConfiguration(t *testing.T) {
 	}
 
 	vctx.WithRemuxMode("some-other-mode")
-	if vctx.remuxMode != RemuxFFmpeg {
-		t.Errorf("expected VoiceCtx invalid mode to fallback to %q, got %q", RemuxFFmpeg, vctx.remuxMode)
+	if vctx.remuxMode != RemuxNativeGo {
+		t.Errorf("expected VoiceCtx invalid mode to fallback to %q, got %q", RemuxNativeGo, vctx.remuxMode)
+	}
+
+	vctx.WithRemuxMode("native-go")
+	if vctx.remuxMode != RemuxNativeGo {
+		t.Errorf("expected VoiceCtx remuxMode to be set to %q, got %q", RemuxNativeGo, vctx.remuxMode)
 	}
 }

@@ -38,10 +38,17 @@ import (
 type RemuxMode string
 
 const (
-	// RemuxFFmpeg executes external ffmpeg processes (default/fallback).
+	// RemuxFFmpeg executes external ffmpeg processes.
+	// Deprecated: Use RemuxNativeGo instead. This mode is kept for compatibility
+	// but may be removed in a future release.
 	RemuxFFmpeg RemuxMode = "ffmpeg"
-	// RemuxNative runs the native library remuxer using purego (experimental).
+	// RemuxNative runs the native library remuxer using purego.
+	// Deprecated: Use RemuxNativeGo instead. This mode is kept for compatibility
+	// but may be removed in a future release.
 	RemuxNative RemuxMode = "native"
+	// RemuxNativeGo runs the pure-Go remuxer using go-mkvparse + mccoy.space/g/ogg.
+	// This is the recommended and default remux mode.
+	RemuxNativeGo RemuxMode = "native-go"
 )
 
 // PlaybackState describes the current state of a VoiceCtx.
@@ -127,12 +134,14 @@ func (m *VoiceManager) Join(guildID, channelID string) (*VoiceCtx, error) {
 	}
 
 	vctx := &VoiceCtx{
-		bot:       m.bot,
-		conn:      conn,
-		guildID:   gid,
-		log:       log,
-		queue:     newQueue(),
-		remuxMode: m.bot.remuxMode,
+		bot:            m.bot,
+		conn:           conn,
+		guildID:        gid,
+		log:            log,
+		queue:          newQueue(),
+		remuxMode:      m.bot.remuxMode,
+		jsRuntimeName:  m.bot.jsRuntimeName,
+		jsRuntimePath:  m.bot.jsRuntimePath,
 	}
 	vctx.state.Store(int32(StateIdle))
 
@@ -183,6 +192,8 @@ type VoiceCtx struct {
 	queue             *queue
 	announceChannelID snowflake.ID
 	remuxMode         RemuxMode
+	jsRuntimeName    string
+	jsRuntimePath    string
 }
 
 // Bot returns the parent *Bot. Mainly for symmetry with CmdCtx / MsgCtx.
@@ -201,10 +212,10 @@ them already replies in-place.
 */
 /*
 WithRemuxMode configures the remuxing strategy for this voice connection.
-Accepted values: "ffmpeg" or "native".
+Accepted values: "ffmpeg" (deprecated), "native" (deprecated), or "native-go" (default).
 
     params:
-          mode: the remuxing mode ("ffmpeg" or "native")
+          mode: the remuxing mode
     returns:
           *VoiceCtx: receiver, for chaining
 */
@@ -212,10 +223,36 @@ func (v *VoiceCtx) WithRemuxMode(mode string) *VoiceCtx {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	switch RemuxMode(mode) {
+	case RemuxFFmpeg:
+		v.remuxMode = RemuxFFmpeg
 	case RemuxNative:
 		v.remuxMode = RemuxNative
+	case RemuxNativeGo:
+		v.remuxMode = RemuxNativeGo
 	default:
-		v.remuxMode = RemuxFFmpeg
+		v.remuxMode = RemuxNativeGo
+	}
+	return v
+}
+
+/*
+WithJSRuntime selects a JavaScript runtime for yt-dlp's signature decryption
+on this specific voice connection. See Bot.WithJSRuntime for accepted values.
+
+    params:
+          name: runtime name ("bun", "deno", "quickjs", or "" to disable)
+          path: optional absolute path to the runtime binary
+    returns:
+          *VoiceCtx: receiver, for chaining
+*/
+func (v *VoiceCtx) WithJSRuntime(name string, path ...string) *VoiceCtx {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.jsRuntimeName = name
+	if len(path) > 0 {
+		v.jsRuntimePath = path[0]
+	} else {
+		v.jsRuntimePath = ""
 	}
 	return v
 }
@@ -769,7 +806,7 @@ func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 				return spawnPassthrough(cachePath)
 			}
 		}
-		return spawnYouTube(t.Source, v.remuxMode)
+		return spawnYouTube(t.Source, v.remuxMode, v.jsRuntimeName, v.jsRuntimePath)
 	case TrackFile:
 		ext := strings.ToLower(filepath.Ext(t.Source))
 		switch ext {

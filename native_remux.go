@@ -10,6 +10,11 @@
 //
 // Dependencies:
 //   - github.com/ebitengine/purego: dynamically registers C functions without Cgo
+//
+// To enable the deprecated RemuxNative mode, build with: -tags puregoremux
+// This file is excluded from default builds because it requires dlopen support.
+//go:build puregoremux
+
 package sikasa
 
 import (
@@ -312,7 +317,7 @@ func initNativeRemuxer() error {
 		}
 
 		// Fallback to auto-installer
-		if errInstall := ensureDependencies(); errInstall != nil {
+		if errInstall := ensureDependencies(""); errInstall != nil {
 			remuxInitErr = fmt.Errorf("failed to auto-install dependencies: %w; original loading error: %v", errInstall, err)
 			return
 		}

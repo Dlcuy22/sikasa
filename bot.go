@@ -114,6 +114,8 @@ type Bot struct {
 	prefetchCtx      context.Context
 	prefetchCancel   context.CancelFunc
 	remuxMode        RemuxMode
+	jsRuntimeName    string // "bun", "deno", "quickjs", etc.; "" means yt-dlp default
+	jsRuntimePath    string // explicit path to the runtime binary; "" means auto-resolve in PATH
 }
 
 /*
@@ -144,7 +146,9 @@ func New(token string) (*Bot, error) {
 		prefetchNotify:   make(chan struct{}, 1),
 		prefetchCtx:      ctx,
 		prefetchCancel:   cancel,
-		remuxMode:        RemuxFFmpeg,
+		remuxMode:        RemuxNativeGo,
+		jsRuntimeName:    "",
+		jsRuntimePath:    "",
 	}, nil
 }
 
@@ -278,19 +282,23 @@ func (b *Bot) WithMusicLogInterval(d time.Duration) *Bot {
 
 /*
 WithRemuxMode configures the default remuxing strategy for new voice connections.
-Accepted values are "ffmpeg" or "native".
+Accepted values: "ffmpeg" (deprecated), "native" (deprecated), or "native-go" (default).
 
 	params:
-	      mode: the remuxing mode ("ffmpeg" or "native")
+	      mode: the remuxing mode
 	returns:
 	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithRemuxMode(mode string) *Bot {
 	switch RemuxMode(mode) {
+	case RemuxFFmpeg:
+		b.remuxMode = RemuxFFmpeg
 	case RemuxNative:
 		b.remuxMode = RemuxNative
+	case RemuxNativeGo:
+		b.remuxMode = RemuxNativeGo
 	default:
-		b.remuxMode = RemuxFFmpeg
+		b.remuxMode = RemuxNativeGo
 	}
 	return b
 }
@@ -299,10 +307,41 @@ func (b *Bot) WithRemuxMode(mode string) *Bot {
 RemuxMode returns the configured default remuxing mode for the bot.
 
 	returns:
-	      string: the configured remuxing mode ("ffmpeg" or "native")
+	      string: the configured remuxing mode ("ffmpeg", "native", or "native-go")
 */
 func (b *Bot) RemuxMode() string {
 	return string(b.remuxMode)
+}
+
+/*
+WithJSRuntime selects a JavaScript runtime for yt-dlp's signature decryption.
+Pass the runtime name and optionally its path. Supported names: "bun", "deno",
+"quickjs". When path is empty the runtime is auto-resolved via PATH.
+
+Examples:
+
+	bot.WithJSRuntime("quickjs")
+	bot.WithJSRuntime("bun")
+	bot.WithJSRuntime("bun", "/usr/local/bin/bun")
+	bot.WithJSRuntime("deno")
+
+Calling WithJSRuntime("") or omitting it entirely lets yt-dlp use its built-in
+default (no --js-runtimes flag).
+
+	params:
+	      name: runtime name ("bun", "deno", "quickjs", or "" to disable)
+	      path: optional absolute path to the runtime binary
+	returns:
+	      *Bot: receiver, for chaining
+*/
+func (b *Bot) WithJSRuntime(name string, path ...string) *Bot {
+	b.jsRuntimeName = name
+	if len(path) > 0 {
+		b.jsRuntimePath = path[0]
+	} else {
+		b.jsRuntimePath = ""
+	}
+	return b
 }
 
 /*
@@ -337,7 +376,7 @@ complete; events run in disgo-managed goroutines from there.
 	      error: if client construction, gateway open, or command sync fails
 */
 func (b *Bot) Start() error {
-	if err := ensureDependencies(); err != nil {
+	if err := ensureDependencies(b.jsRuntimeName); err != nil {
 		b.logger.Printf("sikasa: warning, dependency check/installation failed: %v", err)
 	}
 

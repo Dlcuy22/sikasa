@@ -23,9 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,26 +41,35 @@ and returns the FFmpeg process whose stdout is Ogg-Opus.
 	      *ffmpegProcess: kill this to terminate the whole pipeline
 	      error:          if yt-dlp or ffmpeg cannot be spawned
 */
-func spawnYouTube(url string, mode RemuxMode) (*ffmpegProcess, error) {
-	// Look for a local Bun installation to speed up signature decryption.
-	bunPath := ""
-	home, err := os.UserHomeDir()
-	if err == nil {
-		bp := filepath.Join(home, ".bun", "bin", "bun")
-		if _, err := os.Stat(bp); err == nil {
-			bunPath = bp
-		}
-	}
+func spawnYouTube(url string, mode RemuxMode, jsRuntimeName, jsRuntimePath string) (*ffmpegProcess, error) {
+	ytArgs := buildYTDLPArgs(url, jsRuntimeName, jsRuntimePath)
 
-	ytArgs := []string{
-		"--quiet", "--no-warnings",
-		"-f", "251/250/249", // Force Opus formats only
-		"-o", "-",
+	if mode == RemuxNativeGo {
+		yt := exec.Command(ResolveBinaryPath("yt-dlp"), ytArgs...)
+		ytStdout, err := yt.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("sikasa: yt-dlp stdout pipe: %w", err)
+		}
+		if err := yt.Start(); err != nil {
+			return nil, fmt.Errorf("sikasa: spawn yt-dlp: %w (is it installed?)", err)
+		}
+
+		pr, pw := io.Pipe()
+		go func() {
+			remuxErr := RemuxStreamToWriterGo(ytStdout, pw)
+			if remuxErr != nil {
+				log.Printf("sikasa: native-go remux error: %v", remuxErr)
+				_ = pw.CloseWithError(remuxErr)
+			} else {
+				_ = pw.Close()
+			}
+		}()
+
+		return &ffmpegProcess{
+			stdout:   pr,
+			upstream: yt,
+		}, nil
 	}
-	if bunPath != "" {
-		ytArgs = append(ytArgs, "--js-runtimes", "bun:"+bunPath)
-	}
-	ytArgs = append(ytArgs, url)
 
 	remuxNativeSupported := false
 	if mode == RemuxNative {
@@ -238,4 +245,34 @@ func SearchYouTube(query string, n int) ([]Track, error) {
 		}
 	}
 	return tracks, nil
+}
+
+/*
+buildYTDLPArgs constructs the base yt-dlp argument list for a given URL,
+optionally adding --js-runtimes when a JS runtime is configured.
+
+	params:
+	      url:            the YouTube URL to download
+	      jsRuntimeName:  runtime name ("bun", "deno", "quickjs", or "")
+	      jsRuntimePath:  explicit path to the runtime binary, or "" for auto-resolve
+	returns:
+	      []string: yt-dlp CLI arguments
+*/
+func buildYTDLPArgs(url, jsRuntimeName, jsRuntimePath string) []string {
+	args := []string{
+		"--quiet", "--no-warnings",
+		"-f", "251/250/249",
+		"-o", "-",
+	}
+
+	if jsRuntimeName != "" {
+		runtimeArg := jsRuntimeName
+		if jsRuntimePath != "" {
+			runtimeArg = jsRuntimeName + ":" + jsRuntimePath
+		}
+		args = append(args, "--js-runtimes", runtimeArg)
+	}
+
+	args = append(args, url)
+	return args
 }

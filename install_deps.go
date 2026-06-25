@@ -74,16 +74,15 @@ func ResolveBinaryPath(name string) string {
 }
 
 /*
-ensureDependencies detects the running operating system and attempts to
-install the required FFmpeg shared libraries (libavformat/libavutil) using
-the system package manager if they are not already installed, as well as
-downloading yt-dlp and bun binaries if they are missing.
+ensureDependencies checks for and automatically downloads yt-dlp and bun
+binaries if they are not found in PATH or the local sikasa bin directory.
+The native-go remux mode does not require FFmpeg shared libraries.
 
 	returns:
-	      error: if installation or download fails
+	      error: if download fails
 */
-func ensureDependencies() error {
-	log.Printf("sikasa: checking required dependencies (FFmpeg shared libraries, yt-dlp, bun)...")
+func ensureDependencies(jsRuntimeName string) error {
+	log.Printf("sikasa: checking required dependencies (yt-dlp, bun)...")
 
 	// 1. Ensure local bin directory exists
 	binDir := getSikasaBinDir()
@@ -91,15 +90,7 @@ func ensureDependencies() error {
 		return fmt.Errorf("failed to create local bin directory: %w", err)
 	}
 
-	// 2. Check if we need to install FFmpeg shared libraries (for native remuxer)
-	if err := loadFFmpegLibraries(); err != nil {
-		log.Printf("sikasa: FFmpeg shared libraries not found (%v); attempting system-level installation...", err)
-		if errInstall := installSystemFFmpeg(); errInstall != nil {
-			return fmt.Errorf("failed to install FFmpeg shared libraries: %w", errInstall)
-		}
-	}
-
-	// 3. Check for yt-dlp
+	// 2. Check for yt-dlp
 	ytDlpPath := ResolveBinaryPath("yt-dlp")
 	if ytDlpPath == "yt-dlp" || ytDlpPath == "yt-dlp.exe" {
 		log.Printf("sikasa: yt-dlp not found in PATH or local directory; downloading...")
@@ -108,12 +99,14 @@ func ensureDependencies() error {
 		}
 	}
 
-	// 4. Check for bun
-	bunPath := ResolveBinaryPath("bun")
-	if bunPath == "bun" || bunPath == "bun.exe" {
-		log.Printf("sikasa: bun not found in PATH or local directory; downloading...")
-		if err := downloadBun(); err != nil {
-			return fmt.Errorf("failed to download bun: %w", err)
+	// 3. Check for bun (only when selected as JS runtime)
+	if jsRuntimeName == "bun" {
+		bunPath := ResolveBinaryPath("bun")
+		if bunPath == "bun" || bunPath == "bun.exe" {
+			log.Printf("sikasa: bun not found in PATH or local directory; downloading...")
+			if err := downloadBun(); err != nil {
+				return fmt.Errorf("failed to download bun: %w", err)
+			}
 		}
 	}
 
@@ -192,6 +185,13 @@ downloadYtDlp downloads the correct yt-dlp binary for the current OS/architectur
 	returns:
 	      error: on download failure
 */
+func isMusl() bool {
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		return true
+	}
+	return false
+}
+
 func downloadYtDlp() error {
 	var url string
 	ext := ""
@@ -200,6 +200,8 @@ func downloadYtDlp() error {
 		ext = ".exe"
 	} else if runtime.GOOS == "darwin" {
 		url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+	} else if isMusl() {
+		url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_musllinux"
 	} else {
 		if runtime.GOARCH == "arm64" {
 			url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64"

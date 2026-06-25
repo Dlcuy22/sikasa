@@ -83,21 +83,7 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 
 	tmpPath := cachePath + ".tmp"
 
-	// Look for a Bun installation to speed up signature decryption.
-	bunPath := ""
-	if bp := ResolveBinaryPath("bun"); bp != "bun" && bp != "bun.exe" {
-		bunPath = bp
-	}
-
-	ytArgs := []string{
-		"--quiet", "--no-warnings",
-		"-f", "251/250/249", // Force high-quality Opus audio formats
-		"-o", "-",
-	}
-	if bunPath != "" {
-		ytArgs = append(ytArgs, "--js-runtimes", "bun:"+bunPath)
-	}
-	ytArgs = append(ytArgs, url)
+	ytArgs := buildYTDLPArgs(url, b.jsRuntimeName, b.jsRuntimePath)
 
 	yt := exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
 	ytStdout, err := yt.StdoutPipe()
@@ -107,7 +93,27 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 	}
 
 	remuxDone := false
-	if b.remuxMode == RemuxNative {
+	if b.remuxMode == RemuxNativeGo {
+		if err := yt.Start(); err == nil {
+			remuxErr := RemuxStreamGo(ytStdout, tmpPath)
+			_ = yt.Process.Kill()
+			_ = yt.Wait()
+			if remuxErr == nil {
+				remuxDone = true
+			} else {
+				b.vlog().Error("voice: native-go prefetch remux failed; falling back to ffmpeg", "url", url, "err", remuxErr)
+				os.Remove(tmpPath)
+				yt = exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
+				ytStdout, err = yt.StdoutPipe()
+				if err != nil {
+					b.vlog().Error("voice: prefetch fallback yt-dlp pipe failed", "url", url, "err", err)
+					return
+				}
+			}
+		} else {
+			b.vlog().Error("voice: prefetch spawn yt-dlp failed for native-go remux", "url", url, "err", err)
+		}
+	} else if b.remuxMode == RemuxNative {
 		if err := yt.Start(); err == nil {
 			remuxErr := RemuxStream(ytStdout, tmpPath)
 			_ = yt.Process.Kill()

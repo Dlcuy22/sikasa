@@ -1,3 +1,5 @@
+//go:build puregoremux
+
 // Package sikasa: native_remux_test.go
 // Purpose: Implements unit tests for the native dynamic remuxer, including
 // initialization, library loading, and callback error propagation.
@@ -132,3 +134,7 @@ func TestNativeRemux_ToWriter(t *testing.T) {
 		t.Error("expected written buffer to be non-empty")
 	}
 }
+
+// ---- Pure-Go remuxer tests ----
+
+
