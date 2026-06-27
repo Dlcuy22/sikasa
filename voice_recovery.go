@@ -147,6 +147,10 @@ func (h *recoveryHandler) maybeRecover(r slog.Record) {
 		h.mu.Unlock()
 
 		go func(vctx *VoiceCtx) {
+			if !vctx.isReconnecting.CompareAndSwap(false, true) {
+				return
+			}
+			defer vctx.isReconnecting.Store(false)
 			if err := vctx.Reconnect(); err != nil {
 				vctx.log.Error("voice: auto-reconnect failed", "err", err)
 			}

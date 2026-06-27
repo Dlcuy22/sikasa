@@ -113,6 +113,8 @@ type Bot struct {
 	prefetchNotify   chan struct{}
 	prefetchCtx      context.Context
 	prefetchCancel   context.CancelFunc
+	recoveryCtx      context.Context
+	recoveryCancel   context.CancelFunc
 	remuxMode        RemuxMode
 	jsRuntimeName    string // "bun", "deno", "quickjs", etc.; "" means yt-dlp default
 	jsRuntimePath    string // explicit path to the runtime binary; "" means auto-resolve in PATH
@@ -133,6 +135,7 @@ func New(token string) (*Bot, error) {
 		return nil, ErrEmptyToken
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	rctx, rcancel := context.WithCancel(context.Background())
 	return &Bot{
 		token:            token,
 		intents:          gateway.IntentsNone,
@@ -146,6 +149,8 @@ func New(token string) (*Bot, error) {
 		prefetchNotify:   make(chan struct{}, 1),
 		prefetchCtx:      ctx,
 		prefetchCancel:   cancel,
+		recoveryCtx:      rctx,
+		recoveryCancel:   rcancel,
 		remuxMode:        RemuxNativeGo,
 		jsRuntimeName:    "",
 		jsRuntimePath:    "",
@@ -446,6 +451,12 @@ func (b *Bot) Start() error {
 		go b.prefetchWorker()
 	}
 
+	if b.recoveryCtx.Err() != nil {
+		b.recoveryCtx, b.recoveryCancel = context.WithCancel(context.Background())
+	}
+	go b.recoveryWorker()
+	go b.runRecovery()
+
 	b.logger.Printf("sikasa: bot online")
 	return nil
 }
@@ -483,6 +494,9 @@ after Start().
 func (b *Bot) Stop() error {
 	if b.prefetchCancel != nil {
 		b.prefetchCancel()
+	}
+	if b.recoveryCancel != nil {
+		b.recoveryCancel()
 	}
 
 	b.voicesMu.Lock()

@@ -107,6 +107,9 @@ func (m *VoiceManager) Join(guildID, channelID string) (*VoiceCtx, error) {
 			log.Error("voice: switch channel failed", "err", err)
 			return nil, fmt.Errorf("sikasa: switch voice channel: %w", err)
 		}
+		existing.mu.Lock()
+		existing.channelID = cid
+		existing.mu.Unlock()
 		return existing, nil
 	}
 	m.bot.voicesMu.Unlock()
@@ -137,6 +140,7 @@ func (m *VoiceManager) Join(guildID, channelID string) (*VoiceCtx, error) {
 		bot:            m.bot,
 		conn:           conn,
 		guildID:        gid,
+		channelID:      cid,
 		log:            log,
 		queue:          newQueue(),
 		remuxMode:      m.bot.remuxMode,
@@ -180,14 +184,16 @@ func (m *VoiceManager) Get(guildID string) *VoiceCtx {
 // quick reads (IsPlaying, State) are lock-free. Each guild gets its own
 // VoiceCtx via Bot.voices, so queues are naturally isolated per session.
 type VoiceCtx struct {
-	bot     *Bot
-	conn    voice.Conn
-	guildID snowflake.ID
-	log     *slog.Logger
+	bot       *Bot
+	conn      voice.Conn
+	guildID   snowflake.ID
+	channelID snowflake.ID
+	log       *slog.Logger
 
 	mu                sync.Mutex
 	source            string
 	state             atomic.Int32
+	isReconnecting    atomic.Bool
 	provider          *streamProvider
 	queue             *queue
 	announceChannelID snowflake.ID
@@ -262,6 +268,7 @@ func (v *VoiceCtx) SetAnnounceChannel(channelID string) *VoiceCtx {
 		v.mu.Lock()
 		v.announceChannelID = 0
 		v.mu.Unlock()
+		v.Persist()
 		return v
 	}
 	cid, err := snowflake.Parse(channelID)
@@ -272,6 +279,7 @@ func (v *VoiceCtx) SetAnnounceChannel(channelID string) *VoiceCtx {
 	v.mu.Lock()
 	v.announceChannelID = cid
 	v.mu.Unlock()
+	v.Persist()
 	return v
 }
 
@@ -359,6 +367,7 @@ func (v *VoiceCtx) PlayYouTube(url string) (firstPos, added int, started bool, e
 
 	if !idle {
 		v.triggerPrefetch()
+		v.Persist()
 		return firstPos, len(tracks), false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
@@ -388,6 +397,7 @@ func (v *VoiceCtx) Enqueue(t Track) (position int, started bool, err error) {
 
 	if !idle {
 		v.triggerPrefetch()
+		v.Persist()
 		return pos, false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
@@ -419,6 +429,7 @@ func (v *VoiceCtx) InsertNext(t Track) (position int, started bool, err error) {
 
 	if !idle {
 		v.triggerPrefetch()
+		v.Persist()
 		return pos, false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
@@ -467,6 +478,7 @@ func (v *VoiceCtx) InsertNextYouTube(url string) (firstPos, added int, started b
 
 	if !idle {
 		v.triggerPrefetch()
+		v.Persist()
 		return first, len(tracks), false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
@@ -491,6 +503,7 @@ func (v *VoiceCtx) Skip() (Track, bool, error) {
 	v.mu.Unlock()
 	if !hasNext {
 		_ = v.Stop()
+		v.Persist()
 		return Track{}, false, nil
 	}
 	if err := v.advanceAndPlay(); err != nil {
@@ -523,6 +536,7 @@ func (v *VoiceCtx) JumpTo(index int) (Track, error) {
 	if err := v.playLoaded(t); err != nil {
 		return Track{}, err
 	}
+	v.Persist()
 	return t, nil
 }
 
@@ -563,6 +577,7 @@ func (v *VoiceCtx) Prev() (Track, error) {
 	if err := v.playLoaded(t); err != nil {
 		return Track{}, err
 	}
+	v.Persist()
 	return t, nil
 }
 
@@ -599,6 +614,7 @@ func (v *VoiceCtx) ClearQueue() {
 	v.queue.Clear()
 	v.mu.Unlock()
 	v.triggerPrefetch()
+	v.Persist()
 }
 
 /*
@@ -614,6 +630,7 @@ func (v *VoiceCtx) Shuffle() error {
 	v.queue.Shuffle()
 	v.mu.Unlock()
 	v.triggerPrefetch()
+	v.Persist()
 	return nil
 }
 
@@ -633,6 +650,7 @@ func (v *VoiceCtx) Pause() error {
 	}
 	p.SetPaused(true)
 	v.state.Store(int32(StatePaused))
+	v.Persist()
 	return nil
 }
 
@@ -651,6 +669,7 @@ func (v *VoiceCtx) Resume() error {
 	}
 	p.SetPaused(false)
 	v.state.Store(int32(StatePlaying))
+	v.Persist()
 	return nil
 }
 
@@ -686,7 +705,9 @@ func (v *VoiceCtx) Leave() error {
 	_ = v.Stop()
 	v.mu.Lock()
 	v.queue.Clear()
+	v.channelID = 0
 	v.mu.Unlock()
+	v.deleteState()
 
 	if v.conn != nil {
 		v.conn.Close(context.TODO())
@@ -724,11 +745,21 @@ func (v *VoiceCtx) Reconnect() error {
 	current, hadTrack := v.queue.Now()
 	v.mu.Unlock()
 
-	channelID := v.conn.ChannelID()
-	if channelID == nil {
+	if v.conn != nil {
+		if channelID := v.conn.ChannelID(); channelID != nil {
+			v.mu.Lock()
+			v.channelID = *channelID
+			v.mu.Unlock()
+		}
+	}
+
+	v.mu.Lock()
+	cid := v.channelID
+	v.mu.Unlock()
+
+	if cid == 0 {
 		return ErrNotInVoice
 	}
-	cid := *channelID
 
 	v.log.Info("voice: reconnecting", "channel_id", cid.String())
 	v.announce(announceCh, "voice connection lost, reconnecting…")
@@ -775,9 +806,14 @@ func (v *VoiceCtx) advanceAndPlay() error {
 	v.mu.Unlock()
 	if !ok {
 		v.state.Store(int32(StateStopped))
+		v.Persist()
 		return nil
 	}
-	return v.playLoaded(t)
+	err := v.playLoaded(t)
+	if err == nil {
+		v.Persist()
+	}
+	return err
 }
 
 // playLoaded spawns the appropriate pipeline for t and swaps it into the
@@ -856,6 +892,7 @@ func (v *VoiceCtx) onTrackDone() {
 	if !hasNext {
 		v.state.Store(int32(StateStopped))
 		v.announce(announceCh, "no more tracks")
+		v.Persist()
 		return
 	}
 	if err := v.advanceAndPlay(); err != nil {
