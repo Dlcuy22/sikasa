@@ -64,11 +64,18 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 		return
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
-	b.cacheActive[url] = cancel
+	doneChan := make(chan struct{})
+	b.cacheActive[url] = activePrefetch{
+		cancel: cancel,
+		done:   doneChan,
+	}
 	b.cacheMu.Unlock()
 
 	defer func() {
 		b.cacheMu.Lock()
+		if act, ok := b.cacheActive[url]; ok {
+			close(act.done)
+		}
 		delete(b.cacheActive, url)
 		b.cacheMu.Unlock()
 		cancel()
@@ -325,10 +332,10 @@ func (v *VoiceCtx) triggerPrefetch() {
 	v.bot.voicesMu.Unlock()
 
 	v.bot.cacheMu.Lock()
-	for url, cancel := range v.bot.cacheActive {
+	for url, act := range v.bot.cacheActive {
 		cachePath := v.bot.getCachePath(url)
 		if !keep[cachePath] {
-			cancel()
+			act.cancel()
 		}
 	}
 	v.bot.cacheMu.Unlock()

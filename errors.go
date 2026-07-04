@@ -66,4 +66,8 @@ var (
 	// ErrNotSameChannel is returned by guards that require the invoking user
 	// to be in the same voice channel as the bot.
 	ErrNotSameChannel = errors.New("sikasa: you must be in the same voice channel as the bot")
+
+	// ErrPlaybackAborted is returned when playback is aborted because the track
+	// or queue cursor changed while spawning.
+	ErrPlaybackAborted = errors.New("sikasa: playback aborted")
 )

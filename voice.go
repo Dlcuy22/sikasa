@@ -20,6 +20,7 @@ package sikasa
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -200,6 +201,7 @@ type VoiceCtx struct {
 	remuxMode         RemuxMode
 	jsRuntimeName    string
 	jsRuntimePath    string
+	reconnectFailures int
 }
 
 // Bot returns the parent *Bot. Mainly for symmetry with CmdCtx / MsgCtx.
@@ -773,6 +775,7 @@ func (v *VoiceCtx) Reconnect() error {
 	defer cancelOpen()
 	if err := conn.Open(openCtx, cid, false, false); err != nil {
 		v.bot.client.VoiceManager.RemoveConn(v.guildID)
+		v.incrementFailuresAndCheck()
 		return fmt.Errorf("sikasa: reconnect open: %w", err)
 	}
 	speakCtx, cancelSpeak := context.WithTimeout(context.Background(), 5*time.Second)
@@ -780,11 +783,13 @@ func (v *VoiceCtx) Reconnect() error {
 	if err := conn.SetSpeaking(speakCtx, voice.SpeakingFlagMicrophone); err != nil {
 		conn.Close(context.Background())
 		v.bot.client.VoiceManager.RemoveConn(v.guildID)
+		v.incrementFailuresAndCheck()
 		return fmt.Errorf("sikasa: reconnect set speaking: %w", err)
 	}
 
 	v.mu.Lock()
 	v.conn = conn
+	v.reconnectFailures = 0
 	v.mu.Unlock()
 
 	if !hadTrack {
@@ -820,10 +825,25 @@ func (v *VoiceCtx) advanceAndPlay() error {
 // provider slot. Used by Enqueue (first track), Skip (manual advance), Prev
 // (rewind), and the auto-advance callback.
 func (v *VoiceCtx) playLoaded(t Track) error {
+	v.mu.Lock()
+	expectedCursor := v.queue.Cursor()
+	v.mu.Unlock()
+
 	proc, err := v.spawnTrack(t)
 	if err != nil {
 		return err
 	}
+
+	v.mu.Lock()
+	currentCursor := v.queue.Cursor()
+	current, ok := v.queue.Now()
+	if !ok || currentCursor != expectedCursor || current.Source != t.Source {
+		v.mu.Unlock()
+		proc.Kill()
+		return fmt.Errorf("%w: track or cursor changed during spawn", ErrPlaybackAborted)
+	}
+	v.mu.Unlock()
+
 	v.swapProvider(proc, t.Label())
 	v.triggerPrefetch()
 	return nil
@@ -841,6 +861,24 @@ func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 				v.log.Info("voice: playing from local cache", "url", t.Source, "path", cachePath)
 				return spawnPassthrough(cachePath)
 			}
+
+			v.bot.cacheMu.Lock()
+			act, active := v.bot.cacheActive[t.Source]
+			v.bot.cacheMu.Unlock()
+
+			if active {
+				v.log.Info("voice: track is being prefetched, waiting for download to complete", "url", t.Source)
+				select {
+				case <-act.done:
+					if _, err := os.Stat(cachePath); err == nil {
+						v.log.Info("voice: prefetch finished during wait, playing from local cache", "url", t.Source, "path", cachePath)
+						return spawnPassthrough(cachePath)
+					}
+					v.log.Warn("voice: prefetch finished but file not found on disk, falling back to stream", "url", t.Source)
+				case <-time.After(15 * time.Second):
+					v.log.Warn("voice: timeout waiting for prefetch, falling back to stream", "url", t.Source)
+				}
+			}
 		}
 		return spawnYouTube(t.Source, v.remuxMode, v.jsRuntimeName, v.jsRuntimePath)
 	case TrackFile:
@@ -853,6 +891,18 @@ func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 		}
 	default:
 		return nil, ErrInvalidArg
+	}
+}
+
+func (v *VoiceCtx) incrementFailuresAndCheck() {
+	v.mu.Lock()
+	v.reconnectFailures++
+	failures := v.reconnectFailures
+	v.mu.Unlock()
+
+	if failures >= 3 {
+		v.log.Error("voice: reconnect failed 3 times, triggering hard restart")
+		v.bot.Restart()
 	}
 }
 
@@ -896,8 +946,10 @@ func (v *VoiceCtx) onTrackDone() {
 		return
 	}
 	if err := v.advanceAndPlay(); err != nil {
-		v.log.Error("voice: auto-advance failed", "err", err)
-		v.announce(announceCh, "auto-advance failed: "+err.Error())
+		if !errors.Is(err, ErrPlaybackAborted) {
+			v.log.Error("voice: auto-advance failed", "err", err)
+			v.announce(announceCh, "auto-advance failed: "+err.Error())
+		}
 		return
 	}
 	if t, ok := v.Now(); ok {

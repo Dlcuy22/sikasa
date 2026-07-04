@@ -80,6 +80,16 @@ const (
 //
 // Note: Not safe for concurrent registration; build all commands and keywords
 // before calling Start(). After Start, the underlying client is goroutine-safe.
+/*
+activePrefetch bundles the cancellation function and a synchronization
+channel for an ongoing track prefetch download.
+*/
+type activePrefetch struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// Bot is the high-level wrapper around disgo's bot.Client.
 type Bot struct {
 	token   string
 	intents gateway.Intents
@@ -108,7 +118,7 @@ type Bot struct {
 	cacheMaxAhead    int
 	cacheEnabled     bool
 	cacheMu          sync.Mutex
-	cacheActive      map[string]context.CancelFunc
+	cacheActive      map[string]activePrefetch
 	musicLogInterval time.Duration
 	prefetchNotify   chan struct{}
 	prefetchCtx      context.Context
@@ -118,6 +128,7 @@ type Bot struct {
 	remuxMode        RemuxMode
 	jsRuntimeName    string // "bun", "deno", "quickjs", etc.; "" means yt-dlp default
 	jsRuntimePath    string // explicit path to the runtime binary; "" means auto-resolve in PATH
+	onRestart        func()
 }
 
 /*
@@ -144,7 +155,7 @@ func New(token string) (*Bot, error) {
 		cacheDir:         "sikasa-data/audiocache",
 		cacheMaxAhead:    3,
 		cacheEnabled:     true,
-		cacheActive:      make(map[string]context.CancelFunc),
+		cacheActive:      make(map[string]activePrefetch),
 		musicLogInterval: 5 * time.Second,
 		prefetchNotify:   make(chan struct{}, 1),
 		prefetchCtx:      ctx,
@@ -718,3 +729,18 @@ func (h *ColorHandler) WithGroup(name string) slog.Handler {
 	}
 	return newH
 }
+
+/*
+Restart cleans up all active voice connections and gateway sessions, then
+re-executes the current binary to perform a hard restart.
+*/
+func (b *Bot) Restart() {
+	b.logger.Printf("sikasa: restarting binary...")
+	_ = b.Stop()
+	if b.onRestart != nil {
+		b.onRestart()
+		return
+	}
+	b.restartProcess()
+}
+
