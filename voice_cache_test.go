@@ -30,31 +30,31 @@ func TestCache_Configuration(t *testing.T) {
 	}
 
 	// Verify defaults
-	if bot.cacheDir != "sikasa-data/audiocache" {
-		t.Errorf("expected default cacheDir to be 'sikasa-data/audiocache', got %q", bot.cacheDir)
+	if bot.config.Cache.Dir != "sikasa-data/audiocache" {
+		t.Errorf("expected default cacheDir to be 'sikasa-data/audiocache', got %q", bot.config.Cache.Dir)
 	}
-	if bot.cacheMaxAhead != 3 {
-		t.Errorf("expected default cacheMaxAhead to be 3, got %d", bot.cacheMaxAhead)
+	if bot.config.Cache.MaxAhead != 3 {
+		t.Errorf("expected default cacheMaxAhead to be 3, got %d", bot.config.Cache.MaxAhead)
 	}
-	if !bot.cacheEnabled {
+	if !bot.config.Cache.Enabled {
 		t.Error("expected caching to be enabled by default")
 	}
 
 	// Test fluent WithCache
 	bot.WithCache("custom-cache", 5)
-	if bot.cacheDir != "custom-cache" {
-		t.Errorf("expected cacheDir to be 'custom-cache', got %q", bot.cacheDir)
+	if bot.config.Cache.Dir != "custom-cache" {
+		t.Errorf("expected cacheDir to be 'custom-cache', got %q", bot.config.Cache.Dir)
 	}
-	if bot.cacheMaxAhead != 5 {
-		t.Errorf("expected cacheMaxAhead to be 5, got %d", bot.cacheMaxAhead)
+	if bot.config.Cache.MaxAhead != 5 {
+		t.Errorf("expected cacheMaxAhead to be 5, got %d", bot.config.Cache.MaxAhead)
 	}
-	if !bot.cacheEnabled {
+	if !bot.config.Cache.Enabled {
 		t.Error("expected cache to remain enabled after WithCache")
 	}
 
 	// Test fluent WithoutCache
 	bot.WithoutCache()
-	if bot.cacheEnabled {
+	if bot.config.Cache.Enabled {
 		t.Error("expected cache to be disabled after WithoutCache")
 	}
 }
@@ -235,71 +235,5 @@ func TestCache_Shuffle(t *testing.T) {
 		if exists(tr.Source) {
 			t.Errorf("expected shuffled track at index %d (%s) to be deleted from cache", i, tr.Source)
 		}
-	}
-}
-
-/*
-TestBot_RemuxModeConfiguration verifies configuring RemuxMode on Bot and VoiceCtx.
-
-	params:
-	      t: test runner context
-*/
-func TestBot_RemuxModeConfiguration(t *testing.T) {
-	bot, err := New("dummy_token")
-	if err != nil {
-		t.Fatalf("failed to create bot: %v", err)
-	}
-
-	// 1. Verify default
-	if bot.remuxMode != RemuxNativeGo {
-		t.Errorf("expected default remuxMode to be %q, got %q", RemuxNativeGo, bot.remuxMode)
-	}
-
-	// 2. Test Bot.WithRemuxMode
-	bot.WithRemuxMode("native")
-	if bot.remuxMode != RemuxNative {
-		t.Errorf("expected remuxMode to be %q after setting to native, got %q", RemuxNative, bot.remuxMode)
-	}
-
-	bot.WithRemuxMode("invalid-mode")
-	if bot.remuxMode != RemuxNativeGo {
-		t.Errorf("expected invalid mode to fallback to %q, got %q", RemuxNativeGo, bot.remuxMode)
-	}
-
-	// 3. Test native-go mode
-	bot.WithRemuxMode("native-go")
-	if bot.remuxMode != RemuxNativeGo {
-		t.Errorf("expected remuxMode to be %q after setting to native-go, got %q", RemuxNativeGo, bot.remuxMode)
-	}
-
-	// 4. Test VoiceCtx inheritance and WithRemuxMode
-	bot.WithRemuxMode("native")
-	vctx := &VoiceCtx{
-		bot:       bot,
-		remuxMode: bot.remuxMode,
-	}
-
-	if vctx.remuxMode != RemuxNative {
-		t.Errorf("expected VoiceCtx to inherit remuxMode %q, got %q", RemuxNative, vctx.remuxMode)
-	}
-
-	vctx.WithRemuxMode("ffmpeg")
-	if vctx.remuxMode != RemuxFFmpeg {
-		t.Errorf("expected VoiceCtx remuxMode to be set to %q, got %q", RemuxFFmpeg, vctx.remuxMode)
-	}
-
-	vctx.WithRemuxMode("native")
-	if vctx.remuxMode != RemuxNative {
-		t.Errorf("expected VoiceCtx remuxMode to be set to %q, got %q", RemuxNative, vctx.remuxMode)
-	}
-
-	vctx.WithRemuxMode("some-other-mode")
-	if vctx.remuxMode != RemuxNativeGo {
-		t.Errorf("expected VoiceCtx invalid mode to fallback to %q, got %q", RemuxNativeGo, vctx.remuxMode)
-	}
-
-	vctx.WithRemuxMode("native-go")
-	if vctx.remuxMode != RemuxNativeGo {
-		t.Errorf("expected VoiceCtx remuxMode to be set to %q, got %q", RemuxNativeGo, vctx.remuxMode)
 	}
 }

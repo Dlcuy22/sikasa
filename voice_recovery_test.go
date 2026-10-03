@@ -8,10 +8,10 @@
 //
 // Dependencies:
 //   - testing: standard Go testing framework
-//
 package sikasa
 
 import (
+	"bytes"
 	"os"
 	"testing"
 	"time"
@@ -48,16 +48,16 @@ func TestVoice_PrefetchWait(t *testing.T) {
 	bot.cacheMu.Unlock()
 
 	// Run spawnTrack in a separate goroutine as it should block
-	resChan := make(chan *ffmpegProcess, 1)
+	resChan := make(chan opusSource, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
-		proc, err := vctx.spawnTrack(Track{Kind: TrackYouTube, Source: url})
+		src, err := vctx.spawnTrack(Track{Kind: TrackYouTube, Source: url})
 		if err != nil {
 			errChan <- err
 			return
 		}
-		resChan <- proc
+		resChan <- src
 	}()
 
 	// Verify it is blocking (doneChan not closed yet)
@@ -70,8 +70,8 @@ func TestVoice_PrefetchWait(t *testing.T) {
 		// Success: it blocked
 	}
 
-	// Write dummy data to simulate completed download
-	if err := os.WriteFile(cachePath, []byte("dummy ogg data"), 0644); err != nil {
+	// Write a minimal valid Ogg Opus file to simulate a completed prefetch.
+	if err := writeMinimalOggOpus(cachePath); err != nil {
 		t.Fatalf("failed to write dummy cache file: %v", err)
 	}
 
@@ -80,16 +80,31 @@ func TestVoice_PrefetchWait(t *testing.T) {
 
 	// Verify it successfully recovers and plays from cache
 	select {
-	case proc := <-resChan:
-		if proc == nil {
-			t.Fatal("expected non-nil ffmpegProcess")
+	case src := <-resChan:
+		if src == nil {
+			t.Fatal("expected non-nil opusSource")
 		}
-		proc.Kill()
+		_ = src.Close()
 	case err := <-errChan:
 		t.Fatalf("expected spawnTrack to succeed, got error: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for spawnTrack to complete after prefetch finished")
 	}
+}
+
+// writeMinimalOggOpus writes a valid Ogg Opus file with no audio packets, so
+// the Ogg reader can parse its headers.
+func writeMinimalOggOpus(path string) error {
+	var buf bytes.Buffer
+	enc := newOggOpusEncoder(&buf)
+	if err := enc.WritePacket([]byte{0xFC}); err != nil {
+		return err
+	}
+	if err := enc.Finish(); err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, buf.Bytes(), 0644)
 }
 
 /*

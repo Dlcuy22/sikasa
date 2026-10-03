@@ -32,13 +32,6 @@ type recoveryHandler struct {
 	lastAttempt map[string]time.Time
 }
 
-// recoveryDebounce is the minimum interval between reconnect attempts for the
-// same guild. Discord usually finishes a fresh DAVE handshake in well under
-// this window, so 30s is enough headroom to avoid stacking attempts while
-// still being snappy enough that a transient blip is recovered before the
-// listener really notices.
-const recoveryDebounce = 30 * time.Second
-
 // recoveryTriggers are substrings that, when seen in a log error message,
 // trigger a reconnect attempt. Matched case-insensitively. Kept as a small
 // list so future DAVE edge cases can be added without code changes.
@@ -47,6 +40,7 @@ var recoveryTriggers = []string{
 	"failed to encrypt packet",
 	"shard is not ready",
 	"session is no longer valid",
+	"connection reset by peer",
 }
 
 func newRecoveryHandler(inner slog.Handler, b *Bot) *recoveryHandler {
@@ -139,7 +133,7 @@ func (h *recoveryHandler) maybeRecover(r slog.Record) {
 		key := v.guildID.String()
 		h.mu.Lock()
 		last := h.lastAttempt[key]
-		if now.Sub(last) < recoveryDebounce {
+		if now.Sub(last) < h.bot.config.Voice.ReconnectDebounce {
 			h.mu.Unlock()
 			continue
 		}
@@ -151,8 +145,20 @@ func (h *recoveryHandler) maybeRecover(r slog.Record) {
 				return
 			}
 			defer vctx.isReconnecting.Store(false)
-			if err := vctx.Reconnect(); err != nil {
+
+			backoff := 2 * time.Second
+			for {
+				err := vctx.Reconnect()
+				if err == nil {
+					break
+				}
+
 				vctx.log.Error("voice: auto-reconnect failed", "err", err)
+				
+				time.Sleep(backoff)
+				if backoff < 30 * time.Second {
+					backoff *= 2
+				}
 			}
 		}(v)
 	}

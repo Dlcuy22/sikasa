@@ -39,7 +39,7 @@ type PersistedState struct {
 
 // stateDir returns the directory path where state files are saved.
 func (b *Bot) stateDir() string {
-	return filepath.Join(filepath.Dir(b.cacheDir), "state")
+	return filepath.Join(filepath.Dir(b.config.Cache.Dir), "state")
 }
 
 // statePath returns the path to the state JSON file for the given guild.
@@ -116,7 +116,7 @@ func (b *Bot) recoveryWorker() {
 // runRecovery scans the state directory and attempts to reconnect/rejoin guilds.
 func (b *Bot) runRecovery() {
 	dir := b.stateDir()
-	files, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return
@@ -125,7 +125,7 @@ func (b *Bot) runRecovery() {
 		return
 	}
 
-	for _, f := range files {
+	for _, f := range entries {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
 			continue
 		}

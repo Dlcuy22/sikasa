@@ -1,10 +1,8 @@
 // Package sikasa: voice_provider_test.go
-// Purpose: Implements unit tests for streamProvider, pause/resume behavior,
-// and process memory checking.
+// Purpose: Implements unit tests for streamProvider pause/resume behavior.
 //
 // Key Components:
 //   - TestStreamProvider_PauseResume(): Verifies pause/resume flow
-//   - TestStreamProvider_LogSpawnedMemory(): Verifies memory safety
 //
 // Dependencies:
 //   - testing: standard Go testing framework
@@ -21,17 +19,28 @@ import (
 	"github.com/disgoorg/disgo/voice"
 )
 
-type dummyReadCloser struct {
-	io.Reader
+// fakeOpusSource is a minimal opusSource over a fixed set of packets.
+type fakeOpusSource struct {
+	packets [][]byte
+	idx     int
+	closed  bool
 }
 
-/*
-Close implements the Close method on the dummy reader.
+func (f *fakeOpusSource) ReadPacket() ([]byte, error) {
+	if f.idx >= len(f.packets) {
+		return nil, io.EOF
+	}
+	pkt := f.packets[f.idx]
+	f.idx++
 
-	returns:
-	      error: nil error
-*/
-func (dummyReadCloser) Close() error { return nil }
+	return pkt, nil
+}
+
+func (f *fakeOpusSource) Close() error {
+	f.closed = true
+
+	return nil
+}
 
 /*
 TestStreamProvider_PauseResume checks that paused providers yield silence.
@@ -40,14 +49,10 @@ TestStreamProvider_PauseResume checks that paused providers yield silence.
 	      t: test runner context
 */
 func TestStreamProvider_PauseResume(t *testing.T) {
-	dummyData := []byte("OggS...")
-	buf := bytes.NewBuffer(dummyData)
-	proc := &ffmpegProcess{
-		stdout: dummyReadCloser{buf},
-	}
+	src := &fakeOpusSource{packets: [][]byte{{0x00}}}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	prov := newStreamProvider(proc, logger, 5*time.Second)
+	prov := newStreamProvider(src, logger, 5*time.Second)
 
 	prov.SetPaused(true)
 	if !prov.IsPaused() {
@@ -66,24 +71,16 @@ func TestStreamProvider_PauseResume(t *testing.T) {
 	if prov.IsPaused() {
 		t.Error("expected provider to be resumed")
 	}
-}
 
-/*
-TestStreamProvider_LogSpawnedMemory checks that memory check handles nil proc.
-
-	params:
-	      t: test runner context
-*/
-func TestStreamProvider_LogSpawnedMemory(t *testing.T) {
-	prov := &streamProvider{proc: nil}
-	mem := prov.logSpawnedMemory()
-	if mem != 0 {
-		t.Errorf("expected 0 memory with nil proc, got %d", mem)
+	// A resumed provider returns the queued packet, then EOF.
+	frame, err = prov.ProvideOpusFrame()
+	if err != nil {
+		t.Fatalf("ProvideOpusFrame failed: %v", err)
 	}
-
-	prov.proc = &ffmpegProcess{}
-	mem = prov.logSpawnedMemory()
-	if mem != 0 {
-		t.Errorf("expected 0 memory with uninitialized process, got %d", mem)
+	if !bytes.Equal(frame, []byte{0x00}) {
+		t.Errorf("expected the queued packet, got %v", frame)
+	}
+	if _, err := prov.ProvideOpusFrame(); err != io.EOF {
+		t.Errorf("expected io.EOF at end of stream, got %v", err)
 	}
 }

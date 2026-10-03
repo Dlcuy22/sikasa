@@ -1,11 +1,13 @@
 // Package sikasa: songcache.go
-// Purpose: Implements an asynchronous, sequential audio prefetcher and sliding-window
-// cache manager for YouTube tracks. Supports persistent local caches, prioritizing
-// active tracks, and evicting out-of-window cache files.
+// Purpose: Implements an asynchronous, sequential audio prefetcher and sliding-
+// window cache manager for YouTube tracks. Supports persistent local caches,
+// prioritizing active tracks, and evicting out-of-window cache files. Tracks
+// are fetched from the direct media URL ytm-go resolves and framed into Ogg
+// with the pure-Go WebM/Opus reader, so no external process is involved.
 //
 // Key Components:
 //   - getCachePath(): Computes the MD5 filename for cache files.
-//   - prefetchTrack(): Downloads YouTube streams and remuxes them to Ogg files.
+//   - prefetchTrack(): Fetches a YouTube stream and writes it as an Ogg file.
 //   - prefetchWorker(): Background goroutine that processes prefetches sequentially.
 //   - getNextPrefetchTrack(): Selects the next prioritized track that needs caching.
 //   - notifyPrefetch(): Wakes up the background worker.
@@ -15,7 +17,6 @@
 //   - context: Handling cancellation.
 //   - crypto/md5: Generating unique cache keys.
 //   - os: Creating directories and managing files.
-//   - os/exec: Running yt-dlp and ffmpeg.
 //   - path/filepath: Building cross-platform paths.
 package sikasa
 
@@ -25,7 +26,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -40,13 +40,13 @@ getCachePath computes the target Ogg-Opus cache file path for a given URL.
 */
 func (b *Bot) getCachePath(url string) string {
 	hash := md5.Sum([]byte(url))
-	filename := fmt.Sprintf("%x.ogg", hash)
-	return filepath.Join(b.cacheDir, filename)
+	safeName := fmt.Sprintf("%x", hash)
+	return filepath.Join(b.config.Cache.Dir, safeName+".ogg")
 }
 
 /*
-prefetchTrack downloads a YouTube audio stream, remuxes it to an Ogg file,
-and saves it in the cache directory. Automatically utilizes Bun if available.
+prefetchTrack fetches a YouTube track's WebM body and frames its Opus packets
+into an Ogg file saved in the cache directory.
 
 	params:
 	      parentCtx: parent context for lifecycle cancellation
@@ -55,7 +55,7 @@ and saves it in the cache directory. Automatically utilizes Bun if available.
 */
 func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath string) {
 	b.cacheMu.Lock()
-	if !b.cacheEnabled {
+	if !b.config.Cache.Enabled {
 		b.cacheMu.Unlock()
 		return
 	}
@@ -81,7 +81,7 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 		cancel()
 	}()
 
-	if err := os.MkdirAll(b.cacheDir, 0755); err != nil {
+	if err := os.MkdirAll(b.config.Cache.Dir, 0755); err != nil {
 		b.logger.Printf("sikasa: cache directory creation failed: %v", err)
 		return
 	}
@@ -90,133 +90,53 @@ func (b *Bot) prefetchTrack(parentCtx context.Context, url string, cachePath str
 
 	tmpPath := cachePath + ".tmp"
 
-	ytArgs := buildYTDLPArgs(url, b.jsRuntimeName, b.jsRuntimePath)
-
-	yt := exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
-	ytStdout, err := yt.StdoutPipe()
+	src, err := openYouTubeSource(ctx, url)
 	if err != nil {
-		b.vlog().Error("voice: prefetch yt-dlp pipe failed", "url", url, "err", err)
+		b.vlog().Error("voice: prefetch resolve/fetch failed", "url", url, "err", err)
+		return
+	}
+	defer src.Close()
+
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		b.vlog().Error("voice: prefetch write file open failed", "url", url, "err", err)
 		return
 	}
 
-	remuxDone := false
-	if b.remuxMode == RemuxNativeGo {
-		if err := yt.Start(); err == nil {
-			remuxErr := RemuxStreamGo(ytStdout, tmpPath)
-			_ = yt.Process.Kill()
-			_ = yt.Wait()
-			if remuxErr == nil {
-				remuxDone = true
-			} else {
-				b.vlog().Error("voice: native-go prefetch remux failed; falling back to ffmpeg", "url", url, "err", remuxErr)
-				os.Remove(tmpPath)
-				yt = exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
-				ytStdout, err = yt.StdoutPipe()
-				if err != nil {
-					b.vlog().Error("voice: prefetch fallback yt-dlp pipe failed", "url", url, "err", err)
-					return
-				}
-			}
-		} else {
-			b.vlog().Error("voice: prefetch spawn yt-dlp failed for native-go remux", "url", url, "err", err)
-		}
-	} else if b.remuxMode == RemuxNative {
-		if err := yt.Start(); err == nil {
-			remuxErr := RemuxStream(ytStdout, tmpPath)
-			_ = yt.Process.Kill()
-			_ = yt.Wait()
-			if remuxErr == nil {
-				remuxDone = true
-			} else {
-				b.vlog().Error("voice: native prefetch remux failed; falling back to ffmpeg", "url", url, "err", remuxErr)
-				os.Remove(tmpPath)
-				// Re-prepare yt-dlp for fallback
-				yt = exec.CommandContext(ctx, ResolveBinaryPath("yt-dlp"), ytArgs...)
-				ytStdout, err = yt.StdoutPipe()
-				if err != nil {
-					b.vlog().Error("voice: prefetch fallback yt-dlp pipe failed", "url", url, "err", err)
-					return
-				}
-			}
-		} else {
-			b.vlog().Error("voice: prefetch spawn yt-dlp failed for native remux", "url", url, "err", err)
-		}
-	}
-
-	if !remuxDone {
-		// Remux WebM/Opus format into an Ogg container on-the-fly using FFmpeg subprocess.
-		ffArgs := []string{
-			"-hide_banner", "-loglevel", "error",
-			"-i", "pipe:0",
-			"-vn",
-			"-c:a", "copy",
-			"-f", "ogg",
-			"pipe:1",
-		}
-		ff := exec.CommandContext(ctx, ResolveBinaryPath("ffmpeg"), ffArgs...)
-		ff.Stdin = ytStdout
-		ffStdout, err := ff.StdoutPipe()
-		if err != nil {
-			b.vlog().Error("voice: prefetch ffmpeg pipe failed", "url", url, "err", err)
-			return
-		}
-
-		outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		if err != nil {
-			b.vlog().Error("voice: prefetch write file open failed", "url", url, "err", err)
-			return
-		}
-		defer outFile.Close()
-
-		if err := yt.Start(); err != nil {
-			b.vlog().Error("voice: prefetch spawn yt-dlp failed", "url", url, "err", err)
-			os.Remove(tmpPath)
-			return
-		}
-		defer func() {
-			_ = yt.Process.Kill()
-			_ = yt.Wait()
-		}()
-
-		if err := ff.Start(); err != nil {
-			b.vlog().Error("voice: prefetch spawn ffmpeg failed", "url", url, "err", err)
-			os.Remove(tmpPath)
-			return
-		}
-		defer func() {
-			_ = ff.Process.Kill()
-			_ = ff.Wait()
-		}()
-
-		// Stream remuxed audio from ffmpeg stdout to our temporary file.
-		_, err = io.Copy(outFile, ffStdout)
-		_ = outFile.Close()
-
-		_ = ff.Wait()
-		_ = yt.Wait()
-	}
-
-	if err == nil && ctx.Err() == nil {
-		// Verify file size is non-zero before concluding success.
-		if fi, errStat := os.Stat(tmpPath); errStat == nil && fi.Size() > 0 {
-			if errRename := os.Rename(tmpPath, cachePath); errRename == nil {
-				b.vlog().Info("voice: prefetch finished", "url", url, "path", cachePath)
-			} else {
-				b.vlog().Error("voice: prefetch rename failed", "url", url, "err", errRename)
-				os.Remove(tmpPath)
-			}
-		} else {
-			b.vlog().Error("voice: prefetch empty file", "url", url)
-			os.Remove(tmpPath)
-		}
-	} else {
+	if err := writeOggOpus(src, out); err != nil {
+		_ = out.Close()
+		os.Remove(tmpPath)
 		if ctx.Err() != nil {
 			b.vlog().Info("voice: prefetch cancelled", "url", url)
 		} else {
-			b.vlog().Error("voice: prefetch copy failed", "url", url, "err", err)
+			b.vlog().Error("voice: prefetch remux failed", "url", url, "err", err)
 		}
-		os.Remove(tmpPath)
+		return
 	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		os.Remove(tmpPath)
+		b.vlog().Error("voice: prefetch sync failed", "url", url, "err", err)
+		return
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmpPath)
+		b.vlog().Error("voice: prefetch close failed", "url", url, "err", err)
+		return
+	}
+
+	// Verify file size is non-zero before concluding success.
+	if fi, errStat := os.Stat(tmpPath); errStat != nil || fi.Size() == 0 {
+		b.vlog().Error("voice: prefetch empty file", "url", url)
+		os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		b.vlog().Error("voice: prefetch rename failed", "url", url, "err", err)
+		os.Remove(tmpPath)
+		return
+	}
+	b.vlog().Info("voice: prefetch finished", "url", url, "path", cachePath)
 }
 
 /*
@@ -228,7 +148,7 @@ func (b *Bot) prefetchWorker() {
 		case <-b.prefetchCtx.Done():
 			return
 		case <-b.prefetchNotify:
-			for b.cacheEnabled {
+			for b.config.Cache.Enabled {
 				url, cachePath, found := b.getNextPrefetchTrack()
 				if !found {
 					break
@@ -246,7 +166,7 @@ across all active voice sessions.
 func (b *Bot) getNextPrefetchTrack() (string, string, bool) {
 	// Priority order of distances: 0, 1, 2, ..., maxAhead, -1
 	var distances []int
-	for d := 0; d <= b.cacheMaxAhead; d++ {
+	for d := 0; d <= b.config.Cache.MaxAhead; d++ {
 		distances = append(distances, d)
 	}
 	distances = append(distances, -1)
@@ -291,7 +211,7 @@ func (b *Bot) getNextPrefetchTrack() (string, string, bool) {
 notifyPrefetch triggers the sequential prefetch worker if caching is enabled.
 */
 func (b *Bot) notifyPrefetch() {
-	if !b.cacheEnabled {
+	if !b.config.Cache.Enabled {
 		return
 	}
 	select {
@@ -306,7 +226,7 @@ cache, initiates downloads for future tracks, cancels out-of-window downloads,
 and deletes expired cache files from disk.
 */
 func (v *VoiceCtx) triggerPrefetch() {
-	if !v.bot.cacheEnabled {
+	if !v.bot.config.Cache.Enabled {
 		return
 	}
 
@@ -319,7 +239,7 @@ func (v *VoiceCtx) triggerPrefetch() {
 		gCtx.mu.Unlock()
 
 		cStart := max(0, curCursor-1)
-		cEnd := min(len(curTracks)-1, curCursor+v.bot.cacheMaxAhead)
+		cEnd := min(len(curTracks)-1, curCursor+v.bot.config.Cache.MaxAhead)
 
 		for i := cStart; i <= cEnd; i++ {
 			t := curTracks[i]
@@ -341,7 +261,7 @@ func (v *VoiceCtx) triggerPrefetch() {
 	v.bot.cacheMu.Unlock()
 
 	go func() {
-		files, err := os.ReadDir(v.bot.cacheDir)
+		files, err := os.ReadDir(v.bot.config.Cache.Dir)
 		if err != nil {
 			return
 		}
@@ -351,7 +271,7 @@ func (v *VoiceCtx) triggerPrefetch() {
 			}
 			name := f.Name()
 			if strings.HasSuffix(name, ".ogg") {
-				fullPath := filepath.Join(v.bot.cacheDir, name)
+				fullPath := filepath.Join(v.bot.config.Cache.Dir, name)
 				if !keep[fullPath] {
 					_ = os.Remove(fullPath)
 				}
@@ -360,4 +280,27 @@ func (v *VoiceCtx) triggerPrefetch() {
 	}()
 
 	v.bot.notifyPrefetch()
+}
+
+// writeOggOpus frames every Opus packet from src into a minimal Ogg Opus stream
+// written to w. This is the pure-Go replacement for the former yt-dlp + ffmpeg
+// remux, and it is only used to build the on-disk cache.
+func writeOggOpus(src opusSource, w io.Writer) error {
+	enc := newOggOpusEncoder(w)
+
+	for {
+		pkt, err := src.ReadPacket()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return err
+		}
+		if err := enc.WritePacket(pkt); err != nil {
+			return err
+		}
+	}
+
+	return enc.Finish()
 }

@@ -9,7 +9,7 @@
 //   - github.com/dlcuy22/sikasa: the high-level wrapper
 //   - github.com/joho/godotenv:  loads DISCORD_TOKEN from .env.dev
 //
-// Note: /kplay and /kyt require ffmpeg in PATH; /kyt also requires yt-dlp.
+// Note: /kplay and /kyt stream Opus in pure Go; no external binary is required.
 package main
 
 import (
@@ -435,7 +435,7 @@ result count:
 	      ctx:  prefix command context
 	      mode: enqueue (k!yt) or insert-next (k!insert)
 	returns:
-	      error: from voice ops or yt-dlp
+	      error: from voice ops or resolve
 */
 func runYouTubePrefix(ctx *sikasa.PrefixCtx, mode sikasa.YTSearchMode) error {
 	vctx, err := joinAuthorVoicePrefix(ctx)
@@ -484,7 +484,7 @@ func parseLeadingCount(query string) (int, string) {
 }
 
 /*
-playTopSearchResult fetches yt-dlp's top hit for query and routes it
+playTopSearchResult fetches the top YouTube Music hit for query and routes it
 through the chosen mode without producing a picker. Used when k!yt is
 called without an explicit result count.
 
@@ -494,7 +494,7 @@ called without an explicit result count.
 	      query: free-text search string
 	      mode:  enqueue or insert-next
 	returns:
-	      error: from yt-dlp or voice ops
+	      error: from resolve or voice ops
 */
 func playTopSearchResult(ctx *sikasa.PrefixCtx, vctx *sikasa.VoiceCtx, query string, mode sikasa.YTSearchMode) error {
 	results, err := sikasa.SearchYouTube(query, 1)
@@ -565,7 +565,7 @@ picker to the invoker so handleYTSearchClick can refuse strangers.
 	      n:     number of results to show
 	      mode:  enqueue or insert-next, propagated to the click handler
 	returns:
-	      error: from yt-dlp or from posting the embed
+	      error: from resolve or from posting the embed
 */
 func showYouTubeSearch(ctx *sikasa.PrefixCtx, query string, n int, mode sikasa.YTSearchMode) error {
 	results, err := sikasa.SearchYouTube(query, n)
@@ -622,7 +622,7 @@ func handleYTSearchClick(ctx *sikasa.ButtonCtx) error {
 	}
 	track := session.Tracks()[idx]
 
-	// Voice handshake + yt-dlp probe blow past the 3 second interaction
+	// Voice handshake + search resolve blow past the 3 second interaction
 	// window, so ack the click immediately and edit the response after
 	// the slow work returns. Without this Discord shows "interaction
 	// failed" even though the track lands in the queue.

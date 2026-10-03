@@ -25,7 +25,8 @@ type TrackKind int
 const (
 	// TrackFile is a local audio file path. Routed to PlayFile semantics.
 	TrackFile TrackKind = iota
-	// TrackYouTube is any URL yt-dlp can resolve. Routed to PlayYouTube.
+	// TrackYouTube is a YouTube track reference (URL or bare video id),
+	// resolved and streamed in pure Go. Routed to PlayYouTube.
 	TrackYouTube
 )
 

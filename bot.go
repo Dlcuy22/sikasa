@@ -114,21 +114,17 @@ type Bot struct {
 	voices   map[snowflake.ID]*VoiceCtx
 	voicesMu sync.Mutex
 
-	cacheDir         string
-	cacheMaxAhead    int
-	cacheEnabled     bool
 	cacheMu          sync.Mutex
 	cacheActive      map[string]activePrefetch
-	musicLogInterval time.Duration
 	prefetchNotify   chan struct{}
 	prefetchCtx      context.Context
 	prefetchCancel   context.CancelFunc
 	recoveryCtx      context.Context
 	recoveryCancel   context.CancelFunc
-	remuxMode        RemuxMode
-	jsRuntimeName    string // "bun", "deno", "quickjs", etc.; "" means yt-dlp default
-	jsRuntimePath    string // explicit path to the runtime binary; "" means auto-resolve in PATH
 	onRestart        func()
+	config           *Config
+	startTime        time.Time
+	ai               *AIClient
 }
 
 /*
@@ -142,6 +138,7 @@ disgo internally, so pass the raw token from the Developer Portal.
 	      error: reserved for future validation; currently always nil
 */
 func New(token string) (*Bot, error) {
+	printBuildInfo()
 	if token == "" {
 		return nil, ErrEmptyToken
 	}
@@ -152,19 +149,14 @@ func New(token string) (*Bot, error) {
 		intents:          gateway.IntentsNone,
 		logger:           log.Default(),
 		voices:           make(map[snowflake.ID]*VoiceCtx),
-		cacheDir:         "sikasa-data/audiocache",
-		cacheMaxAhead:    3,
-		cacheEnabled:     true,
 		cacheActive:      make(map[string]activePrefetch),
-		musicLogInterval: 5 * time.Second,
 		prefetchNotify:   make(chan struct{}, 1),
 		prefetchCtx:      ctx,
 		prefetchCancel:   cancel,
 		recoveryCtx:      rctx,
 		recoveryCancel:   rcancel,
-		remuxMode:        RemuxNativeGo,
-		jsRuntimeName:    "",
-		jsRuntimePath:    "",
+		config:           DefaultConfig(),
+		startTime:        time.Now(),
 	}, nil
 }
 
@@ -266,9 +258,9 @@ WithCache configures the sliding window audio prefetching cacher.
 	      *Bot:     receiver, for chaining
 */
 func (b *Bot) WithCache(dir string, maxAhead int) *Bot {
-	b.cacheDir = dir
-	b.cacheMaxAhead = maxAhead
-	b.cacheEnabled = true
+	b.config.Cache.Dir = dir
+	b.config.Cache.MaxAhead = maxAhead
+	b.config.Cache.Enabled = true
 	return b
 }
 
@@ -279,12 +271,12 @@ WithoutCache disables the audio prefetching cacher entirely.
 	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithoutCache() *Bot {
-	b.cacheEnabled = false
+	b.config.Cache.Enabled = false
 	return b
 }
 
 /*
-WithMusicLogInterval tunes the logging interval for music process memory usage reports.
+WithMusicLogInterval tunes the logging interval for music stream status reports.
 
 	params:
 	      d: reporting interval (e.g. 5s)
@@ -292,70 +284,22 @@ WithMusicLogInterval tunes the logging interval for music process memory usage r
 	      *Bot: receiver, for chaining
 */
 func (b *Bot) WithMusicLogInterval(d time.Duration) *Bot {
-	b.musicLogInterval = d
+	b.config.System.MusicLogInterval = d
 	return b
 }
 
 /*
-WithRemuxMode configures the default remuxing strategy for new voice connections.
-Accepted values: "ffmpeg" (deprecated), "native" (deprecated), or "native-go" (default).
+WithConfig overrides the bot's configuration with a custom Config struct.
+This allows loading settings from YAML instead of using functional options.
 
 	params:
-	      mode: the remuxing mode
+	      cfg: a custom Config pointer
 	returns:
 	      *Bot: receiver, for chaining
 */
-func (b *Bot) WithRemuxMode(mode string) *Bot {
-	switch RemuxMode(mode) {
-	case RemuxFFmpeg:
-		b.remuxMode = RemuxFFmpeg
-	case RemuxNative:
-		b.remuxMode = RemuxNative
-	case RemuxNativeGo:
-		b.remuxMode = RemuxNativeGo
-	default:
-		b.remuxMode = RemuxNativeGo
-	}
-	return b
-}
-
-/*
-RemuxMode returns the configured default remuxing mode for the bot.
-
-	returns:
-	      string: the configured remuxing mode ("ffmpeg", "native", or "native-go")
-*/
-func (b *Bot) RemuxMode() string {
-	return string(b.remuxMode)
-}
-
-/*
-WithJSRuntime selects a JavaScript runtime for yt-dlp's signature decryption.
-Pass the runtime name and optionally its path. Supported names: "bun", "deno",
-"quickjs". When path is empty the runtime is auto-resolved via PATH.
-
-Examples:
-
-	bot.WithJSRuntime("quickjs")
-	bot.WithJSRuntime("bun")
-	bot.WithJSRuntime("bun", "/usr/local/bin/bun")
-	bot.WithJSRuntime("deno")
-
-Calling WithJSRuntime("") or omitting it entirely lets yt-dlp use its built-in
-default (no --js-runtimes flag).
-
-	params:
-	      name: runtime name ("bun", "deno", "quickjs", or "" to disable)
-	      path: optional absolute path to the runtime binary
-	returns:
-	      *Bot: receiver, for chaining
-*/
-func (b *Bot) WithJSRuntime(name string, path ...string) *Bot {
-	b.jsRuntimeName = name
-	if len(path) > 0 {
-		b.jsRuntimePath = path[0]
-	} else {
-		b.jsRuntimePath = ""
+func (b *Bot) WithConfig(cfg *Config) *Bot {
+	if cfg != nil {
+		b.config = cfg
 	}
 	return b
 }
@@ -392,9 +336,7 @@ complete; events run in disgo-managed goroutines from there.
 	      error: if client construction, gateway open, or command sync fails
 */
 func (b *Bot) Start() error {
-	if err := ensureDependencies(b.jsRuntimeName); err != nil {
-		b.logger.Printf("sikasa: warning, dependency check/installation failed: %v", err)
-	}
+	b.ai = NewAIClient(b.config)
 
 	b.router = handler.New()
 
@@ -455,7 +397,7 @@ func (b *Bot) Start() error {
 		return err
 	}
 
-	if b.cacheEnabled {
+	if b.config.Cache.Enabled {
 		if b.prefetchCtx.Err() != nil {
 			b.prefetchCtx, b.prefetchCancel = context.WithCancel(context.Background())
 		}
@@ -468,7 +410,7 @@ func (b *Bot) Start() error {
 	go b.recoveryWorker()
 	go b.runRecovery()
 
-	b.logger.Printf("sikasa: bot online")
+	b.logger.Printf("sikasa: bot online, dev_user_ids: %v", b.config.System.DevUserIDs)
 	return nil
 }
 
@@ -743,4 +685,49 @@ func (b *Bot) Restart() {
 	}
 	b.restartProcess()
 }
+
+// Uptime returns the duration since the Bot instance was created.
+func (b *Bot) Uptime() time.Duration {
+	return time.Since(b.startTime)
+}
+
+// CacheStats returns the total file count and total size (in bytes) of the voice cache.
+func (b *Bot) CacheStats() (count int, size int64, err error) {
+	dir := b.config.Cache.Dir
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	for _, f := range files {
+		if !f.IsDir() {
+			info, err := f.Info()
+			if err == nil {
+				count++
+				size += info.Size()
+			}
+		}
+	}
+	return count, size, nil
+}
+
+// AvailableContainers returns the Opus containers the pure-Go readers support.
+func (b *Bot) AvailableContainers() []string {
+	return []string{"webm-opus", "ogg-opus"}
+}
+
+// Config returns the bot's configuration.
+func (b *Bot) Config() *Config {
+	return b.config
+}
+
+// AI returns the bot's AI client.
+func (b *Bot) AI() *AIClient {
+	return b.ai
+}
+
+
+
 

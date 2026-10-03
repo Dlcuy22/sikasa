@@ -30,23 +30,9 @@ Sikasa solves this by providing a **Builder pattern**, context helpers (`CmdCtx`
 ## Requirements
 
 - Go 1.26+
-- **Automated Dependency Installer**: For voice and music playback features, Sikasa automatically detects, downloads, and installs any missing external binaries (`ffmpeg` shared libraries, `yt-dlp`, and `bun` for decryption acceleration) into a local sandbox directory (`~/.sikasa/bin`) on first startup. You do not need to install them manually.
-- `ffmpeg` on `PATH` (only if you want to bypass the automated installer with your own system-wide installation)
-- `yt-dlp` on `PATH` (only if you want to bypass the automated installer with your own system-wide installation)
+- No external binaries. YouTube playback and local Opus playback are fully pure Go: `ytm-go` resolves the media URL and the built-in WebM/Ogg readers frame the Opus packets, so `ffmpeg`, `yt-dlp`, and a JS runtime are not needed.
 
-Install on common platforms:
-
-```bash
-# Linux (Debian/Ubuntu)
-sudo apt install ffmpeg && pipx install yt-dlp
-
-# macOS
-brew install ffmpeg yt-dlp
-
-# Windows
-winget install Gyan.FFmpeg
-winget install yt-dlp.yt-dlp
-```
+Local file playback supports Opus only (`.opus` and `.ogg`).
 
 ## Installation
 
@@ -255,21 +241,21 @@ bot.Command("play", "Play a song").
             return ctx.Reply("join error: " + err.Error())
         }
 
-        // Auto-detects file type. .opus and .ogg use stream-copy
-        // passthrough (zero CPU); other formats are transcoded via FFmpeg.
+        // Local .opus and .ogg files are read directly by the pure-Go
+        // Ogg reader; other local formats are not supported.
         return vctx.PlayFile(ctx.String("file"))
     })
 ```
 
-YouTube playback (requires `yt-dlp`):
+YouTube playback (pure Go, no external binary):
 
 ```go
 vctx.PlayYouTube("https://youtu.be/dQw4w9WgXcQ")
 ```
 
-Playlists, channels, and any other multi-entry yt-dlp URL are expanded automatically. A single `PlayYouTube` call appends every entry to the queue in order, so passing `youtube.com/playlist?list=...` enqueues the whole list at once.
+`PlayYouTube` accepts a watch URL, a `youtu.be` link, or a bare video id. It resolves the track through `ytm-go`, so an unresolvable reference returns an error instead of a queue entry that would fail later.
 
-Free-text search via `SearchYouTube(query, n)` returns top-N candidate Tracks (`ytsearch<n>:<query>` under the hood). Pair it with `BuildYTSearchEmbed` and `Bot.OnButton` to give users an interactive picker:
+Free-text search via `SearchYouTube(query, n)` returns top-N candidate Tracks. Pair it with `BuildYTSearchEmbed` and `Bot.OnButton` to give users an interactive picker:
 
 ```go
 // In your prefix handler:
@@ -292,13 +278,13 @@ bot.OnButton("/sikasa/ytsearch/{session}/{idx}", func(ctx *sikasa.ButtonCtx) err
 Sessions live in memory for 5 minutes; only the original invoker can click results.
 
 ```go
-firstPos, added, started, err := vctx.PlayYouTube(playlistURL)
-// added = number of tracks appended (1 for a single video)
+firstPos, added, started, err := vctx.PlayYouTube(trackURL)
+// added = number of tracks appended (1 today)
 // started = true if the first track is now playing
 // firstPos = index of the first appended track
 ```
 
-Each Track in the queue carries `Title` and `Author` (uploader/channel) populated from yt-dlp, so reach for `track.Label()` (`"Title by Author"`) when displaying the queue. This keeps replies clean and avoids Discord's auto-embed spam on raw URLs.
+Each Track in the queue carries `Title` and `Author` populated from the ytm-go catalogue, so reach for `track.Label()` (`"Title by Author"`) when displaying the queue. This keeps replies clean and avoids Discord's auto-embed spam on raw URLs.
 
 `PlayFile` enqueues a local file and returns `(pos, started, err)`. Tracks auto-advance on natural EOF, so a multi-track queue plays straight through without manual prompting.
 

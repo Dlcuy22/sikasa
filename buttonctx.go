@@ -206,8 +206,8 @@ func (c *ButtonCtx) ClearComponents() error {
 
 /*
 DeferUpdate acks the click within Discord's 3 second window without
-visibly changing the message. Use it before doing slow work (yt-dlp probe,
-voice handshake, etc.) that would otherwise leave the user staring at
+visibly changing the message. Use it before doing slow work (YouTube
+resolve, voice handshake, etc.) that would otherwise leave the user staring at
 "this interaction failed". After this call, Update / UpdateEmbed /
 ClearComponents transparently target the deferred response.
 

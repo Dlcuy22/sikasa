@@ -10,10 +10,11 @@
 //
 // Dependencies:
 //   - github.com/disgoorg/disgo/voice: Conn, OpusFrameProvider, SpeakingFlags
-//   - voice_ffmpeg.go, voice_ogg.go, voice_youtube.go: pipeline pieces
-//   - voice_provider.go:                bridges the pipeline to disgo
+//   - voice_youtube.go:   pure-Go YouTube resolution and WebM framing
+//   - ogg_opus.go, webm_opus.go: pure-Go Opus container readers
+//   - voice_provider.go:  bridges the packet source to disgo
 //
-// Note: Pause/Resume now happen at the OpusFrameProvider layer. The provider
+// Note: Pause/Resume happen at the OpusFrameProvider layer. The provider
 // returns voice.SilenceAudioFrame while paused, so disgo's AudioSender keeps
 // ticking and Discord does not drop the speaking session.
 package sikasa
@@ -33,23 +34,6 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
-)
-
-// RemuxMode describes the method used to remux/convert YouTube stream to Ogg-Opus.
-type RemuxMode string
-
-const (
-	// RemuxFFmpeg executes external ffmpeg processes.
-	// Deprecated: Use RemuxNativeGo instead. This mode is kept for compatibility
-	// but may be removed in a future release.
-	RemuxFFmpeg RemuxMode = "ffmpeg"
-	// RemuxNative runs the native library remuxer using purego.
-	// Deprecated: Use RemuxNativeGo instead. This mode is kept for compatibility
-	// but may be removed in a future release.
-	RemuxNative RemuxMode = "native"
-	// RemuxNativeGo runs the pure-Go remuxer using go-mkvparse + mccoy.space/g/ogg.
-	// This is the recommended and default remux mode.
-	RemuxNativeGo RemuxMode = "native-go"
 )
 
 // PlaybackState describes the current state of a VoiceCtx.
@@ -138,15 +122,12 @@ func (m *VoiceManager) Join(guildID, channelID string) (*VoiceCtx, error) {
 	}
 
 	vctx := &VoiceCtx{
-		bot:            m.bot,
-		conn:           conn,
-		guildID:        gid,
-		channelID:      cid,
-		log:            log,
-		queue:          newQueue(),
-		remuxMode:      m.bot.remuxMode,
-		jsRuntimeName:  m.bot.jsRuntimeName,
-		jsRuntimePath:  m.bot.jsRuntimePath,
+		bot:       m.bot,
+		conn:      conn,
+		guildID:   gid,
+		channelID: cid,
+		log:       log,
+		queue:     newQueue(),
 	}
 	vctx.state.Store(int32(StateIdle))
 
@@ -198,9 +179,6 @@ type VoiceCtx struct {
 	provider          *streamProvider
 	queue             *queue
 	announceChannelID snowflake.ID
-	remuxMode         RemuxMode
-	jsRuntimeName    string
-	jsRuntimePath    string
 	reconnectFailures int
 }
 
@@ -218,53 +196,6 @@ them already replies in-place.
 	returns:
 	      *VoiceCtx: receiver, for chaining
 */
-/*
-WithRemuxMode configures the remuxing strategy for this voice connection.
-Accepted values: "ffmpeg" (deprecated), "native" (deprecated), or "native-go" (default).
-
-    params:
-          mode: the remuxing mode
-    returns:
-          *VoiceCtx: receiver, for chaining
-*/
-func (v *VoiceCtx) WithRemuxMode(mode string) *VoiceCtx {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	switch RemuxMode(mode) {
-	case RemuxFFmpeg:
-		v.remuxMode = RemuxFFmpeg
-	case RemuxNative:
-		v.remuxMode = RemuxNative
-	case RemuxNativeGo:
-		v.remuxMode = RemuxNativeGo
-	default:
-		v.remuxMode = RemuxNativeGo
-	}
-	return v
-}
-
-/*
-WithJSRuntime selects a JavaScript runtime for yt-dlp's signature decryption
-on this specific voice connection. See Bot.WithJSRuntime for accepted values.
-
-    params:
-          name: runtime name ("bun", "deno", "quickjs", or "" to disable)
-          path: optional absolute path to the runtime binary
-    returns:
-          *VoiceCtx: receiver, for chaining
-*/
-func (v *VoiceCtx) WithJSRuntime(name string, path ...string) *VoiceCtx {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.jsRuntimeName = name
-	if len(path) > 0 {
-		v.jsRuntimePath = path[0]
-	} else {
-		v.jsRuntimePath = ""
-	}
-	return v
-}
-
 func (v *VoiceCtx) SetAnnounceChannel(channelID string) *VoiceCtx {
 	if channelID == "" {
 		v.mu.Lock()
@@ -325,24 +256,22 @@ func (v *VoiceCtx) PlayFile(path string) (position int, started bool, err error)
 }
 
 /*
-PlayYouTube enqueues a yt-dlp-resolvable URL. Same enqueue-or-play semantics
-as PlayFile, with one extra wrinkle: playlist URLs are expanded into N tracks
-via yt-dlp --flat-playlist, so a single PlayYouTube call can append many
-queue entries at once. Probe failure is non-fatal; on error the raw URL is
-enqueued as a single track and the caller will see it as the bare link.
+PlayYouTube enqueues a YouTube URL or bare video id. Same enqueue-or-play
+semantics as PlayFile. The reference is resolved and expanded through ytm-go
+(no yt-dlp), so a URL that cannot be resolved returns an error instead of a
+queue entry that would fail at playback time.
 
 	params:
-	      url: any URL yt-dlp can resolve (single video, playlist, channel, ...)
+	      url: a YouTube watch URL, youtu.be link, or bare video id
 	returns:
 	      firstPos: 0-based queue index of the first track added
-	      added:    number of tracks appended (1 for a single video, N for
-	                a playlist)
+	      added:    number of tracks appended (always 1 today)
 	      started:  true if this call began playback (queue was idle and the
 	                first new track is now playing)
-	      error:    only if the queue manipulation fails (currently never)
+	      error:    resolve error, or a queue manipulation error
 */
 func (v *VoiceCtx) PlayYouTube(url string) (firstPos, added int, started bool, err error) {
-	if v.bot.cacheEnabled {
+	if v.bot.config.Cache.Enabled {
 		cachePath := v.bot.getCachePath(url)
 		if _, err := os.Stat(cachePath); err == nil {
 			v.log.Info("voice: play youtube found in local cache", "url", url, "path", cachePath)
@@ -352,9 +281,10 @@ func (v *VoiceCtx) PlayYouTube(url string) (firstPos, added int, started bool, e
 	}
 
 	tracks, perr := probeYouTubeEntries(url)
-	if perr != nil || len(tracks) == 0 {
-		// Probe failed or returned nothing. Fall back to enqueuing the raw
-		// URL so the user still gets playback, just without a pretty label.
+	if perr != nil {
+		return 0, 0, false, perr
+	}
+	if len(tracks) == 0 {
 		pos, started, err := v.Enqueue(Track{Kind: TrackYouTube, Source: url})
 		return pos, 1, started, err
 	}
@@ -442,22 +372,20 @@ func (v *VoiceCtx) InsertNext(t Track) (position int, started bool, err error) {
 }
 
 /*
-InsertNextYouTube probes a yt-dlp-resolvable URL (single video, playlist,
-channel) and inserts every resulting track immediately after the currently
-playing one in playlist order. Mirror of PlayYouTube's expand-then-enqueue
-flow but inserts instead of appending. Probe failure falls back to
-inserting the raw URL as a single track.
+InsertNextYouTube probes a YouTube URL or bare video id and inserts the
+resulting track immediately after the currently playing one. Mirror of
+PlayYouTube's resolve-then-insert flow but inserts instead of appending.
 
 	params:
-	      url: any URL yt-dlp can resolve
+	      url: a YouTube watch URL, youtu.be link, or bare video id
 	returns:
 	      firstPos: index of the first inserted track
-	      added:    number of tracks inserted (>=1)
+	      added:    number of tracks inserted (always 1 today)
 	      started:  true if the call kicked off playback (queue was idle)
-	      error:    spawn error when started==true and the pipeline fails
+	      error:    resolve error, or a spawn error when started==true
 */
 func (v *VoiceCtx) InsertNextYouTube(url string) (firstPos, added int, started bool, err error) {
-	if v.bot.cacheEnabled {
+	if v.bot.config.Cache.Enabled {
 		cachePath := v.bot.getCachePath(url)
 		if _, err := os.Stat(cachePath); err == nil {
 			v.log.Info("voice: insert next youtube found in local cache", "url", url, "path", cachePath)
@@ -467,7 +395,10 @@ func (v *VoiceCtx) InsertNextYouTube(url string) (firstPos, added int, started b
 	}
 
 	tracks, perr := probeYouTubeEntries(url)
-	if perr != nil || len(tracks) == 0 {
+	if perr != nil {
+		return 0, 0, false, perr
+	}
+	if len(tracks) == 0 {
 		pos, started, err := v.InsertNext(Track{Kind: TrackYouTube, Source: url})
 		return pos, 1, started, err
 	}
@@ -637,8 +568,8 @@ func (v *VoiceCtx) Shuffle() error {
 }
 
 /*
-Pause stops sending audio frames. The FFmpeg process and parser stay alive,
-so Resume() picks up exactly where playback left off.
+Pause stops sending audio frames. The packet source stays alive, so Resume()
+picks up exactly where playback left off.
 
 	returns:
 	      error: if no audio is currently playing
@@ -676,9 +607,9 @@ func (v *VoiceCtx) Resume() error {
 }
 
 /*
-Stop halts playback and tears down the FFmpeg pipeline. The voice connection
-itself stays open so the next Play* call can reuse it. The queue is left
-intact; call ClearQueue() too if you want a fresh session.
+Stop halts playback and releases the current packet source. The voice
+connection itself stays open so the next Play* call can reuse it. The queue is
+left intact; call ClearQueue() too if you want a fresh session.
 
 	returns:
 	      error: always nil currently; reserved for future error paths
@@ -735,7 +666,8 @@ cursor are preserved; only the audio handshake gets a fresh start.
 	      error: if the channel cannot be re-resolved or the new handshake fails
 
 Note: Resume from mid-track is not supported. The current track restarts
-from the beginning because FFmpeg has been torn down with the connection.
+from the beginning because the packet source has been released with the
+connection.
 */
 func (v *VoiceCtx) Reconnect() error {
 	if v.bot == nil || v.bot.client == nil {
@@ -775,7 +707,11 @@ func (v *VoiceCtx) Reconnect() error {
 	defer cancelOpen()
 	if err := conn.Open(openCtx, cid, false, false); err != nil {
 		v.bot.client.VoiceManager.RemoveConn(v.guildID)
-		v.incrementFailuresAndCheck()
+		if isNetworkError(err) {
+			v.log.Warn("voice: network error during reconnect open, not counting as fatal failure", "err", err)
+		} else {
+			v.incrementFailuresAndCheck()
+		}
 		return fmt.Errorf("sikasa: reconnect open: %w", err)
 	}
 	speakCtx, cancelSpeak := context.WithTimeout(context.Background(), 5*time.Second)
@@ -783,7 +719,11 @@ func (v *VoiceCtx) Reconnect() error {
 	if err := conn.SetSpeaking(speakCtx, voice.SpeakingFlagMicrophone); err != nil {
 		conn.Close(context.Background())
 		v.bot.client.VoiceManager.RemoveConn(v.guildID)
-		v.incrementFailuresAndCheck()
+		if isNetworkError(err) {
+			v.log.Warn("voice: network error during set speaking, not counting as fatal failure", "err", err)
+		} else {
+			v.incrementFailuresAndCheck()
+		}
 		return fmt.Errorf("sikasa: reconnect set speaking: %w", err)
 	}
 
@@ -821,15 +761,15 @@ func (v *VoiceCtx) advanceAndPlay() error {
 	return err
 }
 
-// playLoaded spawns the appropriate pipeline for t and swaps it into the
-// provider slot. Used by Enqueue (first track), Skip (manual advance), Prev
-// (rewind), and the auto-advance callback.
+// playLoaded builds the packet source for t and swaps it into the provider
+// slot. Used by Enqueue (first track), Skip (manual advance), Prev (rewind),
+// and the auto-advance callback.
 func (v *VoiceCtx) playLoaded(t Track) error {
 	v.mu.Lock()
 	expectedCursor := v.queue.Cursor()
 	v.mu.Unlock()
 
-	proc, err := v.spawnTrack(t)
+	src, err := v.spawnTrack(t)
 	if err != nil {
 		return err
 	}
@@ -839,27 +779,28 @@ func (v *VoiceCtx) playLoaded(t Track) error {
 	current, ok := v.queue.Now()
 	if !ok || currentCursor != expectedCursor || current.Source != t.Source {
 		v.mu.Unlock()
-		proc.Kill()
+		_ = src.Close()
 		return fmt.Errorf("%w: track or cursor changed during spawn", ErrPlaybackAborted)
 	}
 	v.mu.Unlock()
 
-	v.swapProvider(proc, t.Label())
+	v.swapProvider(src, t.Label())
 	v.triggerPrefetch()
 	return nil
 }
 
-// spawnTrack picks the right ffmpeg/yt-dlp recipe for a Track. Local files
-// hit the codec switch (passthrough for opus/ogg, transcode otherwise);
-// YouTube tracks go through local cache if available, else standard stream.
-func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
+// spawnTrack picks the right packet source for a Track. Local .opus/.ogg files
+// are read directly through the Ogg reader; YouTube tracks go through the local
+// cache when available, else resolve and fetch the WebM stream in pure Go.
+func (v *VoiceCtx) spawnTrack(t Track) (opusSource, error) {
 	switch t.Kind {
 	case TrackYouTube:
-		if v.bot.cacheEnabled {
+		if v.bot.config.Cache.Enabled {
+			v.bot.prefetchNotify <- struct{}{}
 			cachePath := v.bot.getCachePath(t.Source)
 			if _, err := os.Stat(cachePath); err == nil {
 				v.log.Info("voice: playing from local cache", "url", t.Source, "path", cachePath)
-				return spawnPassthrough(cachePath)
+				return openLocalOggSource(cachePath)
 			}
 
 			v.bot.cacheMu.Lock()
@@ -872,7 +813,7 @@ func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 				case <-act.done:
 					if _, err := os.Stat(cachePath); err == nil {
 						v.log.Info("voice: prefetch finished during wait, playing from local cache", "url", t.Source, "path", cachePath)
-						return spawnPassthrough(cachePath)
+						return openLocalOggSource(cachePath)
 					}
 					v.log.Warn("voice: prefetch finished but file not found on disk, falling back to stream", "url", t.Source)
 				case <-time.After(15 * time.Second):
@@ -880,14 +821,14 @@ func (v *VoiceCtx) spawnTrack(t Track) (*ffmpegProcess, error) {
 				}
 			}
 		}
-		return spawnYouTube(t.Source, v.remuxMode, v.jsRuntimeName, v.jsRuntimePath)
+		return openYouTubeSource(context.Background(), t.Source)
 	case TrackFile:
 		ext := strings.ToLower(filepath.Ext(t.Source))
 		switch ext {
 		case ".opus", ".ogg":
-			return spawnPassthrough(t.Source)
+			return openLocalOggSource(t.Source)
 		default:
-			return spawnTranscode(t.Source)
+			return nil, fmt.Errorf("%w: local file %q is not Opus", ErrInvalidArg, t.Source)
 		}
 	default:
 		return nil, ErrInvalidArg
@@ -900,19 +841,31 @@ func (v *VoiceCtx) incrementFailuresAndCheck() {
 	failures := v.reconnectFailures
 	v.mu.Unlock()
 
-	if failures >= 3 {
-		v.log.Error("voice: reconnect failed 3 times, triggering hard restart")
+	maxFailures := v.bot.config.Voice.MaxReconnects
+	if maxFailures > 0 && failures >= maxFailures {
+		v.log.Error("voice: reconnect failed max times, triggering hard restart", "attempts", failures)
 		v.bot.Restart()
 	}
 }
 
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "shard is not ready") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "session is no longer valid")
+}
+
 // swapProvider replaces the active OpusFrameProvider with a fresh one wrapping
-// the given FFmpeg process. The old provider is closed so its FFmpeg child is
-// reaped before the new one starts producing frames. The new provider's
-// onDone callback hooks into auto-advance so the queue moves forward when a
-// track ends naturally.
-func (v *VoiceCtx) swapProvider(proc *ffmpegProcess, source string) {
-	newProv := newStreamProvider(proc, v.log, v.bot.musicLogInterval)
+// the given packet source. The old provider is closed so its body is released
+// before the new one starts producing frames. The new provider's onDone callback
+// hooks into auto-advance so the queue moves forward when a track ends naturally.
+func (v *VoiceCtx) swapProvider(src opusSource, source string) {
+	newProv := newStreamProvider(src, v.log, v.bot.config.System.MusicLogInterval)
 	newProv.onDone = v.onTrackDone
 
 	v.mu.Lock()
